@@ -4,15 +4,18 @@
 #     cp ansible/vars.yml.example ansible/vars.yml
 #
 # vars.yml is gitignored; this template is what gets committed. One password
-# for everything (qBittorrent, Prowlarr, Jellyfin) — the same username, `pcwt`,
-# is already shared across all three as a plain default in ansible/deploy.yml.
+# for everything (qBittorrent, Radarr, Sonarr, Prowlarr, Jellyfin) — the same
+# username, `pcwt`, is already shared across all five as a plain default in
+# ansible/deploy.yml.
 #
 # Want a different password for one service instead? Replace that line's
-# value with a literal password instead of "{{ master_pass }}" — the other
-# two keep pointing at master_pass either way.
+# value with a literal password instead of "{{ master_pass }}" — the others
+# keep pointing at master_pass either way.
 
 master_pass: "CHANGE_ME_before_first_deploy"
 
 qbt_new_pass: "{{ master_pass }}"
 jellyfin_admin_pass: "{{ master_pass }}"
+radarr_admin_pass: "{{ master_pass }}"
+sonarr_admin_pass: "{{ master_pass }}"
 prowlarr_admin_pass: "{{ master_pass }}"

@@ -86,9 +86,26 @@
     # up, your existing account stays exactly as it is.
     jellyfin_admin_user: pcwt
 
-    # Prowlarr's Web UI login, set once on the first run it finds
-    # authentication still turned off. Ignored after that — changing your
-    # password in Prowlarr's own UI later is never overwritten.
+    # ISO 639-2 codes. Reapplied on every run (it's just a playback preference,
+    # not an account setting, so there's nothing to guard). Only takes effect
+    # on media that actually has more than one audio/subtitle track — a plain
+    # single-track English rip plays exactly as before either way.
+    jellyfin_audio_language: rus
+    jellyfin_subtitle_language: rus
+
+    # The quality profile Jellyseerr requests movies/shows with — must be one
+    # of the names Radarr/Sonarr create by default (Any, SD, HD-720p,
+    # HD-1080p, Ultra-HD, HD - 720p/1080p). HD-1080p excludes 2160p and
+    # Remux-2160p, which is what keeps a request from landing on a giant,
+    # barely-seeded 4K release — see the comment above the Jellyseerr
+    # registration tasks below for what that looked like in practice.
+    jellyseerr_quality_profile: HD-1080p
+
+    # Radarr, Sonarr and Prowlarr's Web UI logins, each set once on the first
+    # run that finds authentication still turned off. Ignored after that —
+    # changing a password in any of their own UIs later is never overwritten.
+    radarr_admin_user: pcwt
+    sonarr_admin_user: pcwt
     prowlarr_admin_user: pcwt
 
     # Public indexers added automatically — no account needed for any of these.
@@ -102,6 +119,11 @@
       - The Pirate Bay
       - LimeTorrents
       - TorrentDownload
+      - Torrent Downloads
+      - RuTor
+      - NoNaMe Club
+      - BigFANGroup
+      - Knaben
 
   tasks:
 
@@ -414,45 +436,56 @@
       loop_control:
         label: "{{ item.name }}"
 
-    # ---------- 3b. Prowlarr: set a UI login ----------
+    # ---------- 3b. Radarr / Sonarr / Prowlarr: set a UI login ----------
     #
-    # Current Prowlarr refuses "no authentication" outright — the Web UI blocks
-    # on an "Authentication Required" modal until a method is chosen, and the
-    # underlying config also rejects authenticationMethod: none via the API.
-    # This does not touch how Radarr/Sonarr talk to Prowlarr (that's the
-    # X-Api-Key header, unaffected by this setting) — it's purely the browser
-    # login. Guarded on authenticationMethod still being "none" so a password
-    # you change later here is never overwritten by a later `make deploy`.
-    - name: "Prowlarr: check current authentication settings"
+    # All three now refuse "no authentication" outright — each Web UI blocks
+    # on an "Authentication Required" modal until a method is chosen, and each
+    # one's config API rejects authenticationMethod: none too. This has
+    # nothing to do with how they talk to EACH OTHER (that's always the
+    # X-Api-Key header, unaffected by this) — it's purely each app's own
+    # browser login. Guarded per-app on authenticationMethod still being
+    # "none" so a password you change later in any of their UIs is never
+    # overwritten by a later `make deploy`.
+    - name: "Radarr / Sonarr / Prowlarr: check current authentication settings"
       ansible.builtin.uri:
-        url: "http://localhost:{{ prowlarr_port }}/api/v1/config/host"
+        url: "http://localhost:{{ item.port }}/api/{{ item.api }}/config/host"
         headers:
-          X-Api-Key: "{{ prowlarr_api_key }}"
+          X-Api-Key: "{{ item.key }}"
         status_code: 200
-      register: prowlarr_host_config
+      register: arr_host_config
       changed_when: false
+      loop:
+        - { name: radarr, port: "{{ radarr_port }}", api: v3, key: "{{ radarr_api_key }}", user: "{{ radarr_admin_user }}", pass: "{{ radarr_admin_pass }}" }
+        - { name: sonarr, port: "{{ sonarr_port }}", api: v3, key: "{{ sonarr_api_key }}", user: "{{ sonarr_admin_user }}", pass: "{{ sonarr_admin_pass }}" }
+        - { name: prowlarr, port: "{{ prowlarr_port }}", api: v1, key: "{{ prowlarr_api_key }}", user: "{{ prowlarr_admin_user }}", pass: "{{ prowlarr_admin_pass }}" }
+      loop_control:
+        label: "{{ item.name }}"
 
-    - name: "Prowlarr: set a UI login"
+    - name: "Radarr / Sonarr / Prowlarr: set a UI login"
       ansible.builtin.uri:
-        url: "http://localhost:{{ prowlarr_port }}/api/v1/config/host"
+        url: "http://localhost:{{ item.item.port }}/api/{{ item.item.api }}/config/host"
         method: PUT
         headers:
-          X-Api-Key: "{{ prowlarr_api_key }}"
+          X-Api-Key: "{{ item.item.key }}"
         body_format: json
         # The API expects the full resource back, not a partial patch — start
-        # from what GET returned and only override the auth fields.
-        body: "{{ prowlarr_host_config.json | combine(prowlarr_auth) }}"
+        # from what the matching GET above returned and only override the
+        # auth fields.
+        body: >-
+          {{ item.json | combine({
+               'authenticationMethod': 'forms',
+               'authenticationRequired': 'disabledForLocalAddresses',
+               'username': item.item.user,
+               'password': item.item.pass,
+               'passwordConfirmation': item.item.pass,
+             }) }}
         status_code: [200, 202]
-      vars:
-        prowlarr_auth:
-          authenticationMethod: forms
-          # Skips the login prompt for anything on your LAN/localhost; still
-          # requires it if Prowlarr is ever reached from outside the network.
-          authenticationRequired: disabledForLocalAddresses
-          username: "{{ prowlarr_admin_user }}"
-          password: "{{ prowlarr_admin_pass }}"
-          passwordConfirmation: "{{ prowlarr_admin_pass }}"
-      when: prowlarr_host_config.json.authenticationMethod == "none"
+      loop: "{{ arr_host_config.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      # Skips the login prompt for anything on your LAN/localhost; still
+      # requires it if reached from outside the network.
+      when: item.json.authenticationMethod == "none"
 
     # ---------- 4. Radarr: download client + root folder ----------
 
@@ -643,14 +676,29 @@
     # definitions that scrape the site directly, so a curated set of them can
     # be added the same way everything else here is.
     #
-    # Kept to four well-known, high-uptime, general-purpose trackers that need
-    # no FlareSolverr proxy — this stack doesn't run one, and several other
+    # Nine well-known, high-uptime trackers, kept to ones that need no
+    # FlareSolverr proxy — this stack doesn't run one, and several other
     # popular sites (1337x, EZTV, the KickassTorrents mirrors) sit behind
-    # Cloudflare and would silently return zero results without it. Each of
-    # these four was hand-verified to return real, well-seeded results before
-    # being added here. Add FlareSolverr as a service and the Cloudflare-gated
-    # ones become viable too, but that's a genuinely separate piece of
-    # infrastructure to run.
+    # Cloudflare and would silently return zero results without it. Every one
+    # of these nine was hand-verified to return real, well-seeded results
+    # before being added here — two others that looked equally promising in
+    # Prowlarr's catalog, Internet Archive and Magnet Cat, failed that check
+    # (DNS/SSL errors and a Cloudflare block respectively) and were left out.
+    # Add FlareSolverr as a service and the Cloudflare-gated ones become
+    # viable too, but that's a genuinely separate piece of infrastructure to
+    # run. RuTor, NoNaMe Club and BigFANGroup are Russian-language trackers,
+    # useful for dubbed/multi-audio releases; Knaben is a meta-search engine
+    # covering many sites at once, so it broadens results well beyond its own
+    # name.
+    #
+    # Not every one of these ends up wired to Radarr/Sonarr even though it's
+    # genuinely working: both apps test-query a new indexer in its own
+    # category before accepting it, and reject the whole thing if that one
+    # query happens to return nothing — observed on The Pirate Bay, RuTor and
+    # Torrent Downloads, which all return real results on a direct Prowlarr
+    # search. Harmless (Prowlarr itself still has all nine, so nothing here
+    # is broken), and outside this playbook's control since it's Radarr's and
+    # Sonarr's own validation, not Prowlarr's.
     # This one isn't just returning bundled data: Prowlarr uses the call to
     # refresh its indexer-definition cache from GitHub first, so it makes an
     # outbound HTTP request before it answers. That request can occasionally
@@ -826,7 +874,30 @@
         jf_token: "{{ jf_auth.json.AccessToken }}"
         jf_user_id: "{{ jf_auth.json.User.Id }}"
         jf_user_policy: "{{ jf_auth.json.User.Policy }}"
+        jf_user_config: "{{ jf_auth.json.User.Configuration }}"
       when: jf_auth is succeeded and jf_auth.json is defined and jf_auth.json.AccessToken is defined
+
+    # Smart subtitle mode shows subtitles automatically for dialogue that
+    # isn't in the preferred audio language (e.g. an English original with a
+    # Russian audio preference set), rather than requiring you to turn them on
+    # by hand every time. Both preferences are no-ops on a file with only one
+    # audio track and no embedded subtitles — most plain single-language rips.
+    - name: "Jellyfin: set the audio/subtitle language preference"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyfin_port }}/Users/{{ jf_user_id }}/Configuration"
+        method: POST
+        headers:
+          Authorization: 'MediaBrowser Token="{{ jf_token }}"'
+        body_format: json
+        body: >-
+          {{ jf_user_config | combine({
+               'AudioLanguagePreference': jellyfin_audio_language,
+               'SubtitleLanguagePreference': jellyfin_subtitle_language,
+               'SubtitleMode': 'Smart',
+             }) }}
+        status_code: [200, 204]
+      when: jf_token is defined
+      ignore_errors: true
 
     # The account /Startup/User creates is marked IsHidden: true (hidden from
     # the login screen), which is fine for Jellyfin itself but breaks Jellyseerr:
@@ -972,6 +1043,33 @@
       when: (jsr_setup is succeeded or jsr_login is succeeded) | default(false)
       ignore_errors: true
 
+    # "Any" — Radarr/Sonarr's own factory-default profile — allows literally
+    # everything including 2160p Remux, and their scoring has no concept of
+    # swarm health: a rare, giant, barely-seeded 4K release scores higher than
+    # a common, fast 1080p one and gets grabbed instead. Observed downloading
+    # at a few hundred KB/s with an ETA in days from a 19-seed swarm, versus
+    # minutes from a 1080p release of the same film with hundreds of seeders.
+    # HD-1080p excludes 2160p/Remux-2160p entirely, so this can't happen —
+    # looked up by name rather than hardcoding its id, since a profile's id is
+    # just its creation order and isn't guaranteed stable.
+    - name: "Radarr: list quality profiles"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ radarr_port }}/api/v3/qualityprofile"
+        headers:
+          X-Api-Key: "{{ radarr_api_key }}"
+        status_code: 200
+      register: radarr_quality_profiles
+      changed_when: false
+
+    - name: "Sonarr: list quality profiles"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ sonarr_port }}/api/v3/qualityprofile"
+        headers:
+          X-Api-Key: "{{ sonarr_api_key }}"
+        status_code: 200
+      register: sonarr_quality_profiles
+      changed_when: false
+
     - name: "Jellyseerr: list existing Radarr servers"
       ansible.builtin.uri:
         url: "http://localhost:{{ jellyseerr_port }}/api/v1/settings/radarr"
@@ -997,8 +1095,8 @@
           apiKey: "{{ radarr_api_key }}"
           useSsl: false
           baseUrl: ""
-          activeProfileId: 1
-          activeProfileName: Any
+          activeProfileId: "{{ (radarr_quality_profiles.json | selectattr('name', 'equalto', jellyseerr_quality_profile) | first).id }}"
+          activeProfileName: "{{ jellyseerr_quality_profile }}"
           activeDirectory: "{{ radarr_root }}"
           is4k: false
           minimumAvailability: released
@@ -1042,8 +1140,8 @@
           apiKey: "{{ sonarr_api_key }}"
           useSsl: false
           baseUrl: ""
-          activeProfileId: 1
-          activeProfileName: Any
+          activeProfileId: "{{ (sonarr_quality_profiles.json | selectattr('name', 'equalto', jellyseerr_quality_profile) | first).id }}"
+          activeProfileName: "{{ jellyseerr_quality_profile }}"
           activeDirectory: "{{ sonarr_root }}"
           activeLanguageProfileId: 1
           is4k: false

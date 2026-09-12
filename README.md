@@ -36,8 +36,21 @@ Open [Jellyseerr](http://localhost:5055), sign in, search for the title, click
 **Request**. That's it — this is what to give everyone in the house. Usually
 ready to watch within a few minutes of the download finishing.
 
-Four public sources are already searching, no setup needed. Want a specific
+Nine public sources are already searching, no setup needed. Want a specific
 tracker you have an account on? Prowlarr → **Indexers** → **Add Indexer**.
+
+Jellyseerr requests default to a minimum of 1080p, not the highest quality
+available. This is deliberate: a 4K release of an older or less popular title
+can have only a handful of seeders and take days, while a 1080p release of the
+same film often has hundreds — capping it keeps things fast without much of a
+visible quality difference on most screens. Want a specific movie in 4K
+anyway? Add it directly in [Radarr](http://localhost:7878) instead and pick
+the Ultra-HD profile there.
+
+Jellyfin is set to prefer Russian audio and subtitles when a file actually has
+them, falling back to the original with subtitles otherwise — so both options
+are there whenever the download provides them (a plain single-language rip
+still just plays in whatever language it was released in).
 
 ## Watching on a TV with Infuse
 
@@ -99,13 +112,13 @@ at the same path — that's what makes the hand-off free: qBittorrent finishes,
 Radarr moves the file across the same filesystem instead of copying it, and
 Jellyfin sees it right away.
 
-Radarr, Sonarr and qBittorrent's advanced settings have no login at all —
-anyone on your LAN can open them. Prowlarr's login only gets asked for if it's
-reached from *outside* your LAN.
+qBittorrent, Radarr, Sonarr and Prowlarr all use the same `pcwt` login as
+Jellyfin. Each only asks for it when reached from *outside* your LAN — inside
+it, they skip straight in.
 
 ### Default indexers
 
-Four public indexers get added to Prowlarr automatically — no account needed,
+Nine public indexers get added to Prowlarr automatically — no account needed,
 each hand-checked to return real, well-seeded results:
 
 | Indexer | Good for |
@@ -113,13 +126,25 @@ each hand-checked to return real, well-seeded results:
 | [YTS](https://yts.mx/) | Movies, small file sizes |
 | [The Pirate Bay](https://thepiratebay.org/) | General — movies and TV |
 | [TorrentDownload](https://www.torrentdownload.info/) | General — movies and TV |
-| [LimeTorrents](https://www.limetorrents.info/) | General — mainly TV (Prowlarr only wires it to Sonarr; a quirk of the indexer, not a bug) |
+| [Torrent Downloads](https://www.torrentdownloads.info/) | General — movies and TV (a different site from the one above, despite the name) |
+| [LimeTorrents](https://www.limetorrents.info/) | General — mainly TV |
+| [RuTor](https://rutor.info/) | Russian-language, dubbed/multi-audio releases |
+| [NoNaMe Club](https://nnmclub.to/) | Russian-language, dubbed/multi-audio releases |
+| [BigFANGroup](https://bigfangroup.org/) | Russian-language, dubbed/multi-audio releases |
+| [Knaben](https://knaben.org/) | Meta-search across many trackers at once |
 
-Left out on purpose: 1337x, EZTV and the KickassTorrents mirrors, which sit
-behind Cloudflare and need a
-[FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) proxy — this
-stack doesn't run one, so they'd silently return nothing instead of actually
-working.
+Left out on purpose: 1337x, EZTV, the KickassTorrents mirrors, Internet
+Archive and Magnet Cat. The first three sit behind Cloudflare and need a
+[FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) proxy this stack
+doesn't run; the last two failed outright when tested (a DNS/SSL error and a
+Cloudflare block).
+
+Not every indexer above ends up wired to *both* Radarr and Sonarr — each app
+test-searches a new indexer before accepting it and silently skips it if that
+one query comes back empty, independent of whether the indexer actually
+works. Harmless: Prowlarr still has all nine, so nothing is missing, just
+possibly not auto-wired to one specific app. Add it there by hand (Settings →
+Indexers → Add Indexer, it'll offer to import from Prowlarr) if you want it.
 
 ### How it works
 
@@ -130,11 +155,15 @@ What `make deploy` does, in order:
 3. **qBittorrent** — sets the permanent username/password and download path,
    creates the `movies`/`tv` categories.
 4. **Radarr / Sonarr** — connects qBittorrent as the download client, sets the
-   library folder each one imports into.
-5. **Prowlarr** — connects Radarr and Sonarr, adds the four public indexers.
-6. **Jellyfin** — creates the admin account, adds the Movies and TV libraries.
-7. **Jellyseerr** — signs in against Jellyfin, connects Radarr and Sonarr,
-   finishes its own setup so it's ready on first open.
+   library folder each one imports into, sets a Web UI login of their own.
+5. **Prowlarr** — connects Radarr and Sonarr, adds the nine public indexers,
+   sets a Web UI login.
+6. **Jellyfin** — creates the admin account, adds the Movies and TV libraries,
+   sets Russian as the preferred audio/subtitle language.
+7. **Jellyseerr** — signs in against Jellyfin, connects Radarr and Sonarr on
+   the HD-1080p quality profile (not the factory default "Any" — see
+   [Requesting a movie or show](#requesting-a-movie-or-show) for why that
+   matters), finishes its own setup so it's ready on first open.
 
 Re-running `make deploy` is always safe: every step checks what's already
 there and skips it. Steps 6–7 drive Jellyfin/Jellyseerr's internal setup
