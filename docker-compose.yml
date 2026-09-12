@@ -1,0 +1,119 @@
+# Reelhub — the six services. See README.md for what each one does.
+#
+# Two conventions hold this together:
+#
+#   1. Every service that touches media mounts the same ./data directory at the
+#      same path (/data). qBittorrent downloads to /data/downloads and Radarr and
+#      Sonarr import into /data/media — one filesystem, so finished downloads are
+#      moved instantly instead of copied.
+#
+#   2. Services reach each other by compose service name (http://radarr:7878),
+#      not localhost. The published ports below are only for you, from the host.
+#
+# PUID/PGID/TZ come from .env if present, otherwise the defaults here apply.
+
+name: reelhub
+
+x-common-env: &common-env
+  PUID: ${PUID:-1000}
+  PGID: ${PGID:-1000}
+  TZ: ${TZ:-Asia/Almaty}
+
+services:
+  # Torrent client. 6881 is the BitTorrent peer port and needs to be reachable
+  # for decent speeds; 8080 is the Web UI the playbook configures over its API.
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    environment:
+      <<: *common-env
+      WEBUI_PORT: 8080
+    volumes:
+      - ./config/qbittorrent:/config
+      - ./data:/data
+    ports:
+      - "8080:8080"
+      - "6881:6881"
+      - "6881:6881/udp"
+    restart: unless-stopped
+    networks:
+      - media
+
+  # Indexer manager. Add trackers here once; it pushes them to Radarr and Sonarr.
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment:
+      <<: *common-env
+    volumes:
+      - ./config/prowlarr:/config
+    ports:
+      - "9696:9696"
+    restart: unless-stopped
+    networks:
+      - media
+
+  # Movies: searches indexers, sends grabs to qBittorrent, imports into
+  # /data/media/movies with proper names Jellyfin can match.
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    environment:
+      <<: *common-env
+    volumes:
+      - ./config/radarr:/config
+      - ./data:/data
+    ports:
+      - "7878:7878"
+    restart: unless-stopped
+    networks:
+      - media
+
+  # TV: same as Radarr, plus it tracks seasons and watches for new episodes.
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    environment:
+      <<: *common-env
+    volumes:
+      - ./config/sonarr:/config
+      - ./data:/data
+    ports:
+      - "8989:8989"
+    restart: unless-stopped
+    networks:
+      - media
+
+  # Media server. Only needs ./data/media — it never sees in-progress downloads.
+  jellyfin:
+    image: lscr.io/linuxserver/jellyfin:latest
+    container_name: jellyfin
+    environment:
+      <<: *common-env
+    volumes:
+      - ./config/jellyfin:/config
+      - ./data/media:/data/media
+    ports:
+      - "8096:8096"
+    restart: unless-stopped
+    networks:
+      - media
+
+  # Request front-end. Talks only to the other services' APIs, so it needs no
+  # media mounts at all.
+  jellyseerr:
+    image: fallenbagel/jellyseerr:latest
+    container_name: jellyseerr
+    environment:
+      TZ: ${TZ:-Asia/Almaty}
+    volumes:
+      - ./config/jellyseerr:/app/config
+    ports:
+      - "5055:5055"
+    restart: unless-stopped
+    networks:
+      - media
+
+networks:
+  media:
+    driver: bridge

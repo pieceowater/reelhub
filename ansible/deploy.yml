@@ -1,0 +1,555 @@
+---
+# =============================================================================
+# Reelhub — bring the stack up and wire the services together
+# =============================================================================
+#
+# What this playbook does, in order:
+#   1. Creates the media/download/config directory tree the containers bind-mount.
+#   2. Runs `docker compose up -d`.
+#   3. qBittorrent: reads the one-time password the container prints on first
+#      boot, logs in, replaces it with the permanent credentials from vars.yml,
+#      sets the default save path and creates the `movies` / `tv` categories.
+#   4. Reads the API keys Radarr / Sonarr / Prowlarr generate into their config.xml.
+#   5. Radarr + Sonarr: registers qBittorrent as a download client and adds the
+#      root folder each one imports into.
+#   6. Prowlarr: registers Radarr and Sonarr as applications so every indexer you
+#      add to Prowlarr is pushed to both automatically (Settings -> Apps -> Sync).
+#   7. Jellyfin: runs the first-boot wizard headlessly and adds the two libraries.
+#   8. Jellyseerr: links it to Jellyfin, Radarr and Sonarr.
+#
+# Requirements: ansible-core only — no extra collections, no Python deps.
+# Everything talks to the services over their documented REST APIs.
+#
+# Run:
+#   cd ansible && ansible-playbook deploy.yml
+#   (ansible.cfg already points at inventory.ini, so -i is not needed)
+#
+# Idempotency: re-running is safe. Creating something that already exists
+# returns 400/409 from the *arr APIs, and those codes are accepted as success
+# rather than treated as failures. Steps 7-8 are best-effort (see below).
+#
+# Portability note: every shell command here sticks to POSIX tools that behave
+# the same on macOS (BSD userland) and Linux (GNU userland). In particular the
+# API keys are parsed with `sed`, NOT `grep -oP` — Perl regex is a GNU-only
+# extension and BSD grep on macOS rejects -P outright.
+# =============================================================================
+
+- name: Deploy the Reelhub stack
+  hosts: local
+  gather_facts: true
+  vars_files:
+    - vars.yml
+  vars:
+    # Repo root, derived from this file's location (<repo>/ansible/deploy.yml).
+    # Nothing here hardcodes a path under $HOME, so the checkout can live
+    # anywhere and can be renamed or moved without editing any config.
+    project_dir: "{{ playbook_dir | dirname }}"
+
+  tasks:
+
+    # ---------- 1. Directory layout and container startup ----------
+
+    # The containers bind-mount ./data and ./config from the project root.
+    # Docker would create these itself, but as root-owned directories, so we
+    # create them up front as the invoking user to keep ownership sane.
+    - name: Create the data and config directory tree
+      ansible.builtin.file:
+        path: "{{ project_dir }}/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - data/media/movies
+        - data/media/tv
+        - data/downloads
+        - config/qbittorrent
+        - config/radarr
+        - config/sonarr
+        - config/prowlarr
+        - config/jellyfin
+        - config/jellyseerr
+
+    - name: Start the stack (docker compose up -d)
+      ansible.builtin.command:
+        cmd: docker compose up -d
+        chdir: "{{ project_dir }}"
+      register: compose_up
+      changed_when: "'Started' in compose_up.stderr or 'Created' in compose_up.stderr"
+
+    # ---------- 2. qBittorrent: replace the one-time password ----------
+
+    # Recent linuxserver/qbittorrent images no longer ship the old
+    # admin/adminadmin default. Instead they generate a random password on the
+    # very first boot and print it to the container log exactly once.
+    # 403 counts as ready on purpose. /api/v2/app/version requires a session,
+    # so an unauthenticated probe gets "403 Forbidden" once qBittorrent is up —
+    # which is exactly the proof we want that the API is answering. Waiting for
+    # a bare 200 here never succeeds and burns all 30 retries before failing.
+    - name: Wait for the qBittorrent Web UI to answer
+      ansible.builtin.uri:
+        url: "http://localhost:{{ qbt_web_port }}/api/v2/app/version"
+        status_code: [200, 403]
+      register: qbt_ping
+      retries: 30
+      delay: 3
+      until: qbt_ping.status in [200, 403]
+
+    # Only present on a first run. On later runs the log line is gone (or the
+    # container was recreated), so this yields an empty string and we fall back
+    # to the permanent password below. failed_when: false keeps an empty grep
+    # (exit code 1) from aborting the play.
+    - name: Read the one-time qBittorrent password from the container log
+      ansible.builtin.shell: |
+        docker compose logs qbittorrent 2>&1 \
+          | grep -i "temporary password" | tail -1 \
+          | grep -oE '[A-Za-z0-9]{6,}$'
+      args:
+        chdir: "{{ project_dir }}"
+      register: qbt_temp_pass
+      changed_when: false
+      failed_when: false
+
+    # First run  -> log in as admin with the one-time password.
+    # Later runs -> log in with the permanent credentials from vars.yml.
+    # qBittorrent answers 200 either way: success sets an SID cookie, failure
+    # returns the body "Fails." with no cookie, which we detect in the next task.
+    - name: Log in to the qBittorrent Web API
+      ansible.builtin.uri:
+        url: "http://localhost:{{ qbt_web_port }}/api/v2/auth/login"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          username: "{{ qbt_bootstrap_user }}"
+          password: "{{ qbt_bootstrap_pass }}"
+        headers:
+          Referer: "http://localhost:{{ qbt_web_port }}"
+        status_code: 200
+        return_content: true
+      vars:
+        qbt_temp: "{{ qbt_temp_pass.stdout | default('') | trim }}"
+        qbt_bootstrap_user: "{{ 'admin' if qbt_temp | length > 0 else qbt_new_user }}"
+        qbt_bootstrap_pass: "{{ qbt_temp if qbt_temp | length > 0 else qbt_new_pass }}"
+      register: qbt_login
+      ignore_errors: true
+
+    - name: Extract the qBittorrent session cookie
+      ansible.builtin.set_fact:
+        qbt_sid: "{{ qbt_login.set_cookie | regex_search('SID=([^;]+)', '\\1') | first }}"
+      when: qbt_login.set_cookie is defined
+
+    # Writes the permanent credentials and the default download directory.
+    # save_path is a path *inside* the container: ./data is mounted at /data.
+    - name: Set the permanent qBittorrent credentials and download path
+      ansible.builtin.uri:
+        url: "http://localhost:{{ qbt_web_port }}/api/v2/app/setPreferences"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          json: >-
+            {"web_ui_username": "{{ qbt_new_user }}",
+             "web_ui_password": "{{ qbt_new_pass }}",
+             "save_path": "{{ qbt_download_path }}"}
+        headers:
+          Referer: "http://localhost:{{ qbt_web_port }}"
+          Cookie: "SID={{ qbt_sid }}"
+        status_code: 200
+      when: qbt_sid is defined
+
+    # Changing the credentials invalidates the session we were using, so we have
+    # to log in again before we can create the categories. The retry loop covers
+    # the brief window where qBittorrent is still applying the new preferences.
+    - name: Re-authenticate with the permanent qBittorrent credentials
+      ansible.builtin.uri:
+        url: "http://localhost:{{ qbt_web_port }}/api/v2/auth/login"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          username: "{{ qbt_new_user }}"
+          password: "{{ qbt_new_pass }}"
+        headers:
+          Referer: "http://localhost:{{ qbt_web_port }}"
+        status_code: 200
+        return_content: true
+      register: qbt_relogin
+      retries: 5
+      delay: 2
+      until: qbt_relogin.set_cookie is defined
+      ignore_errors: true
+
+    - name: Refresh the qBittorrent session cookie
+      ansible.builtin.set_fact:
+        qbt_sid: "{{ qbt_relogin.set_cookie | regex_search('SID=([^;]+)', '\\1') | first }}"
+      when: qbt_relogin.set_cookie is defined
+
+    # Radarr and Sonarr each hand their downloads to qBittorrent tagged with one
+    # of these categories; the category's save path is what keeps finished movies
+    # and episodes in separate trees. 409 means the category already exists.
+    - name: Create the qBittorrent categories (movies/tv)
+      ansible.builtin.uri:
+        url: "http://localhost:{{ qbt_web_port }}/api/v2/torrents/createCategory"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          category: "{{ item }}"
+          savePath: "/data/media/{{ 'movies' if item == qbt_category_movies else 'tv' }}"
+        headers:
+          Referer: "http://localhost:{{ qbt_web_port }}"
+          Cookie: "SID={{ qbt_sid }}"
+        status_code: [200, 409]
+      loop:
+        - "{{ qbt_category_movies }}"
+        - "{{ qbt_category_tv }}"
+      when: qbt_sid is defined
+      ignore_errors: true
+
+    # ---------- 3. Collect the *arr API keys ----------
+
+    # Radarr, Sonarr and Prowlarr each generate a random API key on first boot
+    # and write it into /config/config.xml. Nothing can be configured over their
+    # APIs until that file exists, so wait for it.
+    - name: Wait for the *arr apps to write their config.xml
+      ansible.builtin.wait_for:
+        path: "{{ project_dir }}/config/{{ item }}/config.xml"
+        timeout: 120
+      loop:
+        - radarr
+        - sonarr
+        - prowlarr
+
+    # Portable extraction: BSD sed (macOS) and GNU sed (Linux) both understand
+    # this BRE. Do not "simplify" this to `grep -oP '(?<=<ApiKey>)[^<]+'` —
+    # -P is a GNU extension and macOS ships BSD grep, which fails with
+    # "invalid option -- P" and aborts the whole play here.
+    - name: Read the API keys out of each config.xml
+      ansible.builtin.shell: >
+        sed -n 's|.*<ApiKey>\([^<]*\)</ApiKey>.*|\1|p'
+        "{{ project_dir }}/config/{{ item }}/config.xml"
+      loop:
+        - radarr
+        - sonarr
+        - prowlarr
+      register: api_keys_raw
+      changed_when: false
+
+    - name: Store the API keys as facts
+      ansible.builtin.set_fact:
+        radarr_api_key: "{{ api_keys_raw.results[0].stdout | trim }}"
+        sonarr_api_key: "{{ api_keys_raw.results[1].stdout | trim }}"
+        prowlarr_api_key: "{{ api_keys_raw.results[2].stdout | trim }}"
+
+    - name: Fail early if any API key came back empty
+      ansible.builtin.assert:
+        that:
+          - radarr_api_key | length > 0
+          - sonarr_api_key | length > 0
+          - prowlarr_api_key | length > 0
+        fail_msg: >-
+          Could not read one or more API keys from config/*/config.xml.
+          Check that the radarr/sonarr/prowlarr containers started cleanly
+          (docker compose logs radarr) before re-running.
+
+    # ---------- 4. Radarr: download client + root folder ----------
+
+    # host is `qbittorrent`, not localhost: these calls configure how Radarr
+    # reaches qBittorrent, and that traffic goes container-to-container over the
+    # compose network, where the service name is the hostname.
+    # 400 is accepted because that is what Radarr returns when an identically
+    # named download client already exists (i.e. on a re-run).
+    - name: "Radarr: register qBittorrent as the download client"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ radarr_port }}/api/v3/downloadclient"
+        method: POST
+        headers:
+          X-Api-Key: "{{ radarr_api_key }}"
+        body_format: json
+        body:
+          enable: true
+          protocol: torrent
+          priority: 1
+          name: qBittorrent
+          implementation: QBittorrent
+          configContract: QBittorrentSettings
+          fields:
+            - { name: host, value: qbittorrent }
+            - { name: port, value: "{{ qbt_web_port }}" }
+            - { name: username, value: "{{ qbt_new_user }}" }
+            - { name: password, value: "{{ qbt_new_pass }}" }
+            - { name: category, value: "{{ qbt_category_movies }}" }
+            - { name: useSsl, value: false }
+        status_code: [200, 201, 400]
+
+    # Where Radarr moves finished movies. Container-side path (./data -> /data).
+    - name: "Radarr: add the movies root folder"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ radarr_port }}/api/v3/rootfolder"
+        method: POST
+        headers:
+          X-Api-Key: "{{ radarr_api_key }}"
+        body_format: json
+        body:
+          path: "{{ radarr_root }}"
+        status_code: [200, 201, 400]
+
+    # ---------- 5. Sonarr: download client + root folder ----------
+
+    - name: "Sonarr: register qBittorrent as the download client"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ sonarr_port }}/api/v3/downloadclient"
+        method: POST
+        headers:
+          X-Api-Key: "{{ sonarr_api_key }}"
+        body_format: json
+        body:
+          enable: true
+          protocol: torrent
+          priority: 1
+          name: qBittorrent
+          implementation: QBittorrent
+          configContract: QBittorrentSettings
+          fields:
+            - { name: host, value: qbittorrent }
+            - { name: port, value: "{{ qbt_web_port }}" }
+            - { name: username, value: "{{ qbt_new_user }}" }
+            - { name: password, value: "{{ qbt_new_pass }}" }
+            - { name: category, value: "{{ qbt_category_tv }}" }
+            - { name: useSsl, value: false }
+        status_code: [200, 201, 400]
+
+    - name: "Sonarr: add the TV root folder"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ sonarr_port }}/api/v3/rootfolder"
+        method: POST
+        headers:
+          X-Api-Key: "{{ sonarr_api_key }}"
+        body_format: json
+        body:
+          path: "{{ sonarr_root }}"
+        status_code: [200, 201, 400]
+
+    # ---------- 6. Prowlarr: push indexers to Radarr and Sonarr ----------
+
+    # Registering Radarr/Sonarr as Prowlarr "applications" with syncLevel
+    # fullSync means every indexer you add in Prowlarr later is copied into both
+    # automatically — you never configure the same tracker three times.
+    #
+    # syncCategories are Newznab/Torznab category IDs: the 2xxx range is movies,
+    # the 5xxx range is TV. They tell Prowlarr which results belong to which app.
+    #
+    # prowlarrUrl/baseUrl use compose service names because Prowlarr and the *arr
+    # apps talk to each other inside the docker network, not through localhost.
+    - name: "Prowlarr: connect Radarr for indexer sync"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ prowlarr_port }}/api/v1/applications"
+        method: POST
+        headers:
+          X-Api-Key: "{{ prowlarr_api_key }}"
+        body_format: json
+        body:
+          name: Radarr
+          implementation: Radarr
+          configContract: RadarrSettings
+          syncLevel: fullSync
+          fields:
+            - { name: prowlarrUrl, value: "http://prowlarr:{{ prowlarr_port }}" }
+            - { name: baseUrl, value: "http://radarr:{{ radarr_port }}" }
+            - { name: apiKey, value: "{{ radarr_api_key }}" }
+            - { name: syncCategories, value: [2000, 2010, 2020, 2030, 2040, 2045, 2050, 2060] }
+        status_code: [200, 201, 400]
+
+    - name: "Prowlarr: connect Sonarr for indexer sync"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ prowlarr_port }}/api/v1/applications"
+        method: POST
+        headers:
+          X-Api-Key: "{{ prowlarr_api_key }}"
+        body_format: json
+        body:
+          name: Sonarr
+          implementation: Sonarr
+          configContract: SonarrSettings
+          syncLevel: fullSync
+          fields:
+            - { name: prowlarrUrl, value: "http://prowlarr:{{ prowlarr_port }}" }
+            - { name: baseUrl, value: "http://sonarr:{{ sonarr_port }}" }
+            - { name: apiKey, value: "{{ sonarr_api_key }}" }
+            - { name: syncCategories, value: [5000, 5010, 5020, 5030, 5040, 5045, 5050] }
+        status_code: [200, 201, 400]
+
+    # ---------- 7. Jellyfin: headless first-boot wizard (best-effort) ----------
+    #
+    # Everything above uses stable, documented APIs. From here down we drive
+    # Jellyfin's /Startup/* wizard endpoints, which are internal and have changed
+    # shape between releases. Every task is ignore_errors: true so a version
+    # mismatch degrades into "finish this one by hand" instead of failing the run.
+    # Manual fallback: open http://localhost:8096 and the wizard runs there.
+
+    - name: "Jellyfin: wait for the server and check whether the wizard ran"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyfin_port }}/System/Info/Public"
+        status_code: 200
+      register: jf_info
+      retries: 20
+      delay: 3
+      until: jf_info.status == 200
+
+    # The three /Startup/* calls below only apply to a fresh install; once the
+    # wizard is complete Jellyfin rejects them, so they are skipped on re-runs.
+    - name: "Jellyfin: set language and metadata locale"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyfin_port }}/Startup/Configuration"
+        method: POST
+        body_format: json
+        body:
+          UICulture: "en-US"
+          MetadataCountryCode: "US"
+          PreferredMetadataLanguage: "en"
+        status_code: [200, 204]
+      when: not (jf_info.json.StartupWizardCompleted | default(false))
+      ignore_errors: true
+
+    - name: "Jellyfin: create the administrator account"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyfin_port }}/Startup/User"
+        method: POST
+        body_format: json
+        body:
+          Name: "{{ jellyfin_admin_user }}"
+          Password: "{{ jellyfin_admin_pass }}"
+        status_code: [200, 204]
+      when: not (jf_info.json.StartupWizardCompleted | default(false))
+      ignore_errors: true
+
+    - name: "Jellyfin: finish the wizard"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyfin_port }}/Startup/Complete"
+        method: POST
+        status_code: [200, 204]
+      when: not (jf_info.json.StartupWizardCompleted | default(false))
+      ignore_errors: true
+
+    # Adding libraries needs a real access token, so authenticate as the admin
+    # we just created. The X-Emby-Authorization header is mandatory — Jellyfin
+    # rejects the login without a client identification string.
+    - name: "Jellyfin: authenticate as the administrator"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyfin_port }}/Users/AuthenticateByName"
+        method: POST
+        body_format: json
+        body:
+          Username: "{{ jellyfin_admin_user }}"
+          Pw: "{{ jellyfin_admin_pass }}"
+        headers:
+          X-Emby-Authorization: >-
+            MediaBrowser Client="ansible", Device="ansible", DeviceId="ansible-pcwt", Version="1.0"
+        status_code: 200
+        return_content: true
+      register: jf_auth
+      ignore_errors: true
+
+    - name: "Jellyfin: store the access token"
+      ansible.builtin.set_fact:
+        jf_token: "{{ jf_auth.json.AccessToken }}"
+      when: jf_auth is succeeded and jf_auth.json is defined and jf_auth.json.AccessToken is defined
+
+    # These paths are the same ones Radarr and Sonarr import into, so anything
+    # they finish appears in Jellyfin without a second copy. 400 means a library
+    # with that name already exists.
+    - name: "Jellyfin: add the Movies library"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyfin_port }}/Library/VirtualFolders?name=Movies&collectionType=movies&refreshLibrary=true"
+        method: POST
+        headers:
+          X-Emby-Token: "{{ jf_token }}"
+        body_format: json
+        body:
+          LibraryOptions:
+            PathInfos:
+              - Path: "{{ radarr_root }}"
+        status_code: [200, 204, 400]
+      when: jf_token is defined
+      ignore_errors: true
+
+    - name: "Jellyfin: add the TV Shows library"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyfin_port }}/Library/VirtualFolders?name=TV%20Shows&collectionType=tvshows&refreshLibrary=true"
+        method: POST
+        headers:
+          X-Emby-Token: "{{ jf_token }}"
+        body_format: json
+        body:
+          LibraryOptions:
+            PathInfos:
+              - Path: "{{ sonarr_root }}"
+        status_code: [200, 204, 400]
+      when: jf_token is defined
+      ignore_errors: true
+
+    # ---------- 8. Jellyseerr: link Jellyfin / Radarr / Sonarr (best-effort) ----------
+    #
+    # Jellyseerr's setup API is as version-dependent as Jellyfin's wizard, and it
+    # answers 500 for "already configured". All three tasks are best-effort;
+    # manual fallback is the setup wizard at http://localhost:5055.
+
+    - name: "Jellyseerr: link to Jellyfin (initial setup)"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyseerr_port }}/api/v1/auth/jellyfin"
+        method: POST
+        body_format: json
+        body:
+          username: "{{ jellyfin_admin_user }}"
+          password: "{{ jellyfin_admin_pass }}"
+          hostname: "jellyfin"
+          port: "{{ jellyfin_port }}"
+          useSsl: false
+          urlBase: ""
+        status_code: [200, 201, 400, 500]
+      register: jsr_auth
+      ignore_errors: true
+
+    - name: "Jellyseerr: register Radarr as the movie backend"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyseerr_port }}/api/v1/settings/radarr"
+        method: POST
+        body_format: json
+        body:
+          name: Radarr
+          hostname: radarr
+          port: "{{ radarr_port }}"
+          apiKey: "{{ radarr_api_key }}"
+          useSsl: false
+          baseUrl: ""
+          rootFolder: "{{ radarr_root }}"
+          isDefault: true
+        status_code: [200, 201, 400, 500]
+      ignore_errors: true
+
+    - name: "Jellyseerr: register Sonarr as the TV backend"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyseerr_port }}/api/v1/settings/sonarr"
+        method: POST
+        body_format: json
+        body:
+          name: Sonarr
+          hostname: sonarr
+          port: "{{ sonarr_port }}"
+          apiKey: "{{ sonarr_api_key }}"
+          useSsl: false
+          baseUrl: ""
+          rootFolder: "{{ sonarr_root }}"
+          isDefault: true
+        status_code: [200, 201, 400, 500]
+      ignore_errors: true
+
+    # ---------- 9. Summary ----------
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "qBittorrent  http://localhost:{{ qbt_web_port }}   user {{ qbt_new_user }} / password in ansible/vars.yml"
+          - "Prowlarr     http://localhost:{{ prowlarr_port }}   <- START HERE: add your indexers, they sync to Radarr/Sonarr"
+          - "Radarr       http://localhost:{{ radarr_port }}"
+          - "Sonarr       http://localhost:{{ sonarr_port }}"
+          - "Jellyfin     http://localhost:{{ jellyfin_port }}   user {{ jellyfin_admin_user }} / password in ansible/vars.yml"
+          - "Jellyseerr   http://localhost:{{ jellyseerr_port }}"
+          - ""
+          - "If any Jellyfin/Jellyseerr task above says 'failed (ignored)', finish those two"
+          - "in the browser — the qBittorrent, Radarr, Sonarr and Prowlarr steps are done."

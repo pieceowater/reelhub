@@ -1,0 +1,18 @@
+# Runtime state created by the containers on first run. Both are bind-mounts,
+# so they appear as untracked directories rather than docker volumes.
+#   config/ — per-service settings, databases and generated API keys
+#   data/   — the media library and in-progress downloads
+config/
+data/
+
+# Real settings and passwords. The committed template is ansible/vars.yml.example
+ansible/vars.yml
+
+# Local environment overrides (PUID/PGID/TZ). Template: .env.example
+.env
+
+# Ansible scratch
+*.retry
+
+# OS noise
+.DS_Store
