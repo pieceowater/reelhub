@@ -63,7 +63,7 @@
 
     # qBittorrent Web UI username. The playbook sets this alongside qbt_new_pass
     # (from vars.yml) on the very first run.
-    qbt_new_user: admin
+    qbt_new_user: pcwt
 
     # Categories Radarr and Sonarr tag their downloads with. Each one gets its
     # own save path, which is what keeps finished movies and episodes in
@@ -89,7 +89,7 @@
     # Prowlarr's Web UI login, set once on the first run it finds
     # authentication still turned off. Ignored after that — changing your
     # password in Prowlarr's own UI later is never overwritten.
-    prowlarr_admin_user: admin
+    prowlarr_admin_user: pcwt
 
     # Public indexers added automatically — no account needed for any of these.
     # See the comment above the task that uses this for how the list was
@@ -220,19 +220,47 @@
       when: qbt_login.cookies_string | default('') | length == 0
       ignore_errors: true
 
+    # Second fallback, for one specific case: qbt_new_user was changed in
+    # vars.yml *after* qBittorrent was already renamed once. The account is
+    # still under its old name, but this task only knows the new one — so it
+    # tries qBittorrent's own original default, "admin", one more time before
+    # giving up. Without this, changing the username here would silently stop
+    # every later qBittorrent step from running rather than actually renaming
+    # anything.
+    - name: Log in to the qBittorrent Web API (fallback to the original admin account)
+      ansible.builtin.uri:
+        url: "http://localhost:{{ qbt_web_port }}/api/v2/auth/login"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          username: admin
+          password: "{{ qbt_new_pass }}"
+        headers:
+          Referer: "http://localhost:{{ qbt_web_port }}"
+        status_code: [200, 204]
+        return_content: true
+      register: qbt_login_fallback2
+      when:
+        - qbt_login.cookies_string | default('') | length == 0
+        - qbt_login_fallback.cookies_string | default('') | length == 0
+        - qbt_new_user != 'admin'
+      ignore_errors: true
+
     # Use the cookies_string the uri module assembles rather than parsing the
     # Set-Cookie header ourselves. The cookie is not called SID: it is
     # QBT_SID_<port> on current builds and has been renamed before, so matching
     # on a literal name silently breaks on the next release.
     - name: Keep the qBittorrent session cookie
       ansible.builtin.set_fact:
+        # First non-empty cookie out of the three login attempts above, in order.
         qbt_cookie: >-
-          {{ qbt_login.cookies_string
-             if (qbt_login.cookies_string | default('') | length > 0)
-             else qbt_login_fallback.cookies_string }}
+          {{ [qbt_login, qbt_login_fallback, qbt_login_fallback2]
+             | map(attribute='cookies_string', default='')
+             | select('truthy') | first }}
       when: >-
-        (qbt_login.cookies_string | default('') | length > 0)
-        or (qbt_login_fallback.cookies_string | default('') | length > 0)
+        [qbt_login, qbt_login_fallback, qbt_login_fallback2]
+        | map(attribute='cookies_string', default='')
+        | select('truthy') | list | length > 0
 
     - name: Warn if qBittorrent could not be logged into
       ansible.builtin.debug:
@@ -623,13 +651,23 @@
     # being added here. Add FlareSolverr as a service and the Cloudflare-gated
     # ones become viable too, but that's a genuinely separate piece of
     # infrastructure to run.
+    # This one isn't just returning bundled data: Prowlarr uses the call to
+    # refresh its indexer-definition cache from GitHub first, so it makes an
+    # outbound HTTP request before it answers. That request can occasionally
+    # take a while — observed timing out outright while this stack's own
+    # downloads were saturating the network — so this gets a longer timeout
+    # and its own retries rather than sharing the module's 30s default.
     - name: "Prowlarr: fetch the indexer definition catalog"
       ansible.builtin.uri:
         url: "http://localhost:{{ prowlarr_port }}/api/v1/indexer/schema"
         headers:
           X-Api-Key: "{{ prowlarr_api_key }}"
         status_code: 200
+        timeout: 90
       register: prowlarr_indexer_schema
+      retries: 4
+      delay: 15
+      until: prowlarr_indexer_schema is succeeded
       changed_when: false
 
     - name: "Prowlarr: list existing indexers"
