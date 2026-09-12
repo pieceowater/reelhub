@@ -48,6 +48,44 @@
     # anywhere and can be renamed or moved without editing any config.
     project_dir: "{{ playbook_dir | dirname }}"
 
+    # Everything below is a plain, non-secret default. vars.yml (gitignored)
+    # holds only the two passwords; override any of these here if you need
+    # something other than the default for your setup.
+
+    # Service ports. These only ever matter paired with the matching `ports:`
+    # line in docker-compose.yml — to change one, edit both in the same commit.
+    qbt_web_port: 8080
+    radarr_port: 7878
+    sonarr_port: 8989
+    prowlarr_port: 9696
+    jellyfin_port: 8096
+    jellyseerr_port: 5055
+
+    # qBittorrent Web UI username. The playbook sets this alongside qbt_new_pass
+    # (from vars.yml) on the very first run.
+    qbt_new_user: admin
+
+    # Categories Radarr and Sonarr tag their downloads with. Each one gets its
+    # own save path, which is what keeps finished movies and episodes in
+    # separate trees.
+    qbt_category_movies: movies
+    qbt_category_tv: tv
+
+    # Default download directory, as seen from inside the container
+    # (./data on the host is mounted at /data).
+    qbt_download_path: /data/downloads
+
+    # Container-side paths where Radarr and Sonarr file finished media, and
+    # where Jellyfin reads it from. Same filesystem as qbt_download_path on
+    # purpose: imports become instant moves rather than slow copies.
+    radarr_root: /data/media/movies
+    sonarr_root: /data/media/tv
+
+    # Jellyfin administrator username, created by the headless setup wizard on
+    # the very first run. Ignored on later runs — if Jellyfin is already set
+    # up, your existing account stays exactly as it is.
+    jellyfin_admin_user: pcwt
+
   tasks:
 
     # ---------- 1. Directory layout and container startup ----------
@@ -141,16 +179,43 @@
       register: qbt_login
       ignore_errors: true
 
+    # `docker compose logs` replays the container's whole history, not just new
+    # lines, so the one-time password from its original boot is still sitting
+    # there long after qBittorrent invalidated it (the moment the permanent one
+    # got set below). Re-running the play against a container that's been up a
+    # while therefore always tries that stale password above and gets 401 — with
+    # no fallback, every later qBittorrent step would then be skipped forever
+    # even though the permanent password from vars.yml has been in effect the
+    # whole time. Retry with it before giving up.
+    - name: Log in to the qBittorrent Web API (fallback to the permanent password)
+      ansible.builtin.uri:
+        url: "http://localhost:{{ qbt_web_port }}/api/v2/auth/login"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          username: "{{ qbt_new_user }}"
+          password: "{{ qbt_new_pass }}"
+        headers:
+          Referer: "http://localhost:{{ qbt_web_port }}"
+        status_code: [200, 204]
+        return_content: true
+      register: qbt_login_fallback
+      when: qbt_login.cookies_string | default('') | length == 0
+      ignore_errors: true
+
     # Use the cookies_string the uri module assembles rather than parsing the
     # Set-Cookie header ourselves. The cookie is not called SID: it is
     # QBT_SID_<port> on current builds and has been renamed before, so matching
     # on a literal name silently breaks on the next release.
     - name: Keep the qBittorrent session cookie
       ansible.builtin.set_fact:
-        qbt_cookie: "{{ qbt_login.cookies_string }}"
-      when:
-        - qbt_login.cookies_string is defined
-        - qbt_login.cookies_string | length > 0
+        qbt_cookie: >-
+          {{ qbt_login.cookies_string
+             if (qbt_login.cookies_string | default('') | length > 0)
+             else qbt_login_fallback.cookies_string }}
+      when: >-
+        (qbt_login.cookies_string | default('') | length > 0)
+        or (qbt_login_fallback.cookies_string | default('') | length > 0)
 
     - name: Warn if qBittorrent could not be logged into
       ansible.builtin.debug:
@@ -187,6 +252,16 @@
     # Writes the permanent credentials and the default download directory.
     # save_path is a path *inside* the container: ./data is mounted at /data.
     #
+    # The value MUST go through to_json. Writing the JSON as a literal
+    # "{...}" string here is a trap: when a Jinja2-rendered string happens to
+    # look like a Python dict/list literal, Ansible's templating silently
+    # converts it to a native dict — form-urlencoded then serializes it with
+    # Python's repr(), which uses single quotes. qBittorrent receives
+    # {'web_ui_username': 'admin', ...} instead of JSON, fails to parse it,
+    # and answers 200 without changing anything, so the play reports success
+    # while the password is left untouched. to_json forces an actual JSON
+    # string and sidesteps the auto-conversion entirely.
+    #
     # qBittorrent applies this immediately but only flushes qBittorrent.conf to
     # disk periodically and on clean shutdown. If you kill the container right
     # after this step the change can be lost — stop it with `make down` rather
@@ -197,13 +272,32 @@
         method: POST
         body_format: form-urlencoded
         body:
-          json: >-
-            {"web_ui_username": "{{ qbt_new_user }}",
-             "web_ui_password": "{{ qbt_new_pass }}",
-             "save_path": "{{ qbt_download_path }}"}
+          json: "{{ qbt_preferences | to_json }}"
         headers:
           Referer: "http://localhost:{{ qbt_web_port }}"
           Cookie: "{{ qbt_cookie }}"
+        status_code: [200, 204]
+      vars:
+        qbt_preferences:
+          web_ui_username: "{{ qbt_new_user }}"
+          web_ui_password: "{{ qbt_new_pass }}"
+          save_path: "{{ qbt_download_path }}"
+      when: qbt_cookie is defined
+
+    # Verify the change actually took — see the to_json note above for why this
+    # is not just defensive. A stale password here means the qBittorrent
+    # downloadclient tasks on Radarr/Sonarr will fail with a clear "Unable to
+    # connect to qBittorrent" instead of silently leaving the old one wired up.
+    - name: Verify the new qBittorrent password works
+      ansible.builtin.uri:
+        url: "http://localhost:{{ qbt_web_port }}/api/v2/auth/login"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          username: "{{ qbt_new_user }}"
+          password: "{{ qbt_new_pass }}"
+        headers:
+          Referer: "http://localhost:{{ qbt_web_port }}"
         status_code: [200, 204]
       when: qbt_cookie is defined
 
@@ -252,6 +346,28 @@
           Could not read one or more API keys from config/*/config.xml.
           Check that the radarr/sonarr/prowlarr containers started cleanly
           (make logs S=radarr) before re-running.
+
+    # config.xml is written well before the web server starts accepting requests,
+    # so the wait above is not a readiness check on its own — the first API call
+    # lands on a socket that closes without responding ("Status code was -1").
+    # Wait until each app actually answers an authenticated request.
+    - name: Wait for the *arr APIs to start answering
+      ansible.builtin.uri:
+        url: "http://localhost:{{ item.port }}/api/{{ item.api }}/system/status"
+        headers:
+          X-Api-Key: "{{ item.key }}"
+        status_code: 200
+      register: arr_ready
+      retries: 30
+      delay: 3
+      until: arr_ready.status is defined and arr_ready.status == 200
+      changed_when: false
+      loop:
+        - { name: radarr, port: "{{ radarr_port }}", api: v3, key: "{{ radarr_api_key }}" }
+        - { name: sonarr, port: "{{ sonarr_port }}", api: v3, key: "{{ sonarr_api_key }}" }
+        - { name: prowlarr, port: "{{ prowlarr_port }}", api: v1, key: "{{ prowlarr_api_key }}" }
+      loop_control:
+        label: "{{ item.name }}"
 
     # ---------- 4. Radarr: download client + root folder ----------
 
@@ -469,8 +585,21 @@
       when: not (jf_info.json.StartupWizardCompleted | default(false))
       ignore_errors: true
 
-    # Retried because the server answers /System/Info/Public before its startup
-    # state is fully initialised, and an early POST here can come back 404.
+    # On Jellyfin 10.11.11, POSTing /Startup/User cold — without ever having hit
+    # it with GET first — returns a flat, permanent 404, not a transient one:
+    # it was reproduced 40 retries and 2 full minutes deep with no recovery.
+    # Issuing the GET first (its response is just a placeholder, {"Name":"abc"},
+    # and is not used for anything) reliably unblocks the POST on the very next
+    # call. Almost certainly a lazy route/formatter initialization bug scoped to
+    # GET requests on this endpoint; whatever the cause, this priming step is
+    # what actually fixes it — a longer retry loop on the POST alone does not.
+    - name: "Jellyfin: prime the /Startup/User route"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyfin_port }}/Startup/User"
+        status_code: 200
+      when: not (jf_info.json.StartupWizardCompleted | default(false))
+      ignore_errors: true
+
     - name: "Jellyfin: create the administrator account"
       ansible.builtin.uri:
         url: "http://localhost:{{ jellyfin_port }}/Startup/User"
@@ -481,7 +610,7 @@
           Password: "{{ jellyfin_admin_pass }}"
         status_code: [200, 204]
       register: jf_user
-      retries: 5
+      retries: 20
       delay: 3
       until: jf_user.status is defined and jf_user.status in [200, 204]
       when: not (jf_info.json.StartupWizardCompleted | default(false))
@@ -521,7 +650,27 @@
     - name: "Jellyfin: store the access token"
       ansible.builtin.set_fact:
         jf_token: "{{ jf_auth.json.AccessToken }}"
+        jf_user_id: "{{ jf_auth.json.User.Id }}"
+        jf_user_policy: "{{ jf_auth.json.User.Policy }}"
       when: jf_auth is succeeded and jf_auth.json is defined and jf_auth.json.AccessToken is defined
+
+    # The account /Startup/User creates is marked IsHidden: true (hidden from
+    # the login screen), which is fine for Jellyfin itself but breaks Jellyseerr:
+    # its first-run Jellyfin login requires a visible administrator and answers
+    # a flat 500 NO_ADMIN_USER otherwise, with nothing in the response pointing
+    # at IsHidden as the cause. Un-hide it so Jellyseerr's setup step below has
+    # an account it will accept.
+    - name: "Jellyfin: make the administrator account visible on the login screen"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyfin_port }}/Users/{{ jf_user_id }}/Policy"
+        method: POST
+        headers:
+          Authorization: 'MediaBrowser Token="{{ jf_token }}"'
+        body_format: json
+        body: "{{ jf_user_policy | combine({'IsHidden': false}) }}"
+        status_code: [200, 204]
+      when: jf_token is defined and jf_user_policy.IsHidden | default(false)
+      ignore_errors: true
 
     - name: "Jellyfin: list existing libraries"
       ansible.builtin.uri:
@@ -579,7 +728,40 @@
     # call has to carry it or you get a flat 401. Best-effort like Jellyfin
     # above; the fallback is the setup wizard at http://localhost:5055.
 
-    - name: "Jellyseerr: link to Jellyfin (initial setup)"
+    - name: "Jellyseerr: wait for it to start answering"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyseerr_port }}/api/v1/status"
+        status_code: 200
+      register: jsr_ready
+      retries: 30
+      delay: 3
+      until: jsr_ready.status is defined and jsr_ready.status == 200
+      changed_when: false
+      ignore_errors: true
+
+    - name: "Jellyseerr: check whether it has been set up yet"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyseerr_port }}/api/v1/settings/public"
+        status_code: 200
+      register: jsr_public
+      changed_when: false
+      ignore_errors: true
+
+    # This one call does double duty depending on Jellyseerr's state, and the
+    # request shape for each is different — mixing them up is what "NO_ADMIN_USER"
+    # and "Jellyfin hostname already configured" turn out to mean:
+    #
+    #   - Never configured (this task): body carries hostname + serverType and
+    #     the response both signs in AND wires Jellyfin as the media server.
+    #     serverType is mandatory here — 2 is Jellyfin (1 is Plex, 3 is Emby) —
+    #     omit it and Jellyseerr answers 500 NO_ADMIN_USER even for a genuine
+    #     admin, because it never reaches the "is this user an admin" check.
+    #   - Already configured (the task below): the SAME endpoint is now a plain
+    #     login and REJECTS a body that still has `hostname` in it with
+    #     500 "Jellyfin hostname already configured" — so re-running the setup
+    #     body on every deploy breaks a working install. hostname must be
+    #     omitted here to get a session cookie instead.
+    - name: "Jellyseerr: link to Jellyfin (first-time setup)"
       ansible.builtin.uri:
         url: "http://localhost:{{ jellyseerr_port }}/api/v1/auth/jellyfin"
         method: POST
@@ -591,16 +773,41 @@
           port: "{{ jellyfin_port }}"
           useSsl: false
           urlBase: ""
+          serverType: 2
         status_code: [200, 201]
-      register: jsr_auth
+      register: jsr_setup
+      when: not (jsr_public.json.initialized | default(false))
+      ignore_errors: true
+
+    - name: "Jellyseerr: log in (already set up)"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyseerr_port }}/api/v1/auth/jellyfin"
+        method: POST
+        body_format: json
+        body:
+          username: "{{ jellyfin_admin_user }}"
+          password: "{{ jellyfin_admin_pass }}"
+        status_code: [200, 201]
+      register: jsr_login
+      when: jsr_public.json.initialized | default(false)
       ignore_errors: true
 
     - name: "Jellyseerr: keep the session cookie"
       ansible.builtin.set_fact:
-        jsr_cookie: "{{ jsr_auth.cookies_string }}"
-      when:
-        - jsr_auth.cookies_string is defined
-        - jsr_auth.cookies_string | length > 0
+        jsr_cookie: "{{ (jsr_setup if not (jsr_public.json.initialized | default(false)) else jsr_login).cookies_string }}"
+      when: (jsr_setup is succeeded or jsr_login is succeeded) | default(false)
+      ignore_errors: true
+
+    - name: "Jellyseerr: list existing Radarr servers"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyseerr_port }}/api/v1/settings/radarr"
+        headers:
+          Cookie: "{{ jsr_cookie }}"
+        status_code: 200
+      register: jsr_radarr_list
+      when: jsr_cookie is defined
+      changed_when: false
+      ignore_errors: true
 
     - name: "Jellyseerr: register Radarr as the movie backend"
       ansible.builtin.uri:
@@ -626,9 +833,27 @@
           syncEnabled: true
           preventSearch: false
         status_code: [200, 201]
-      when: jsr_cookie is defined
+      when:
+        - jsr_cookie is defined
+        - jsr_radarr_list is succeeded
+        - "'Radarr' not in (jsr_radarr_list.json | default([]) | map(attribute='name') | list)"
       ignore_errors: true
 
+    - name: "Jellyseerr: list existing Sonarr servers"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyseerr_port }}/api/v1/settings/sonarr"
+        headers:
+          Cookie: "{{ jsr_cookie }}"
+        status_code: 200
+      register: jsr_sonarr_list
+      when: jsr_cookie is defined
+      changed_when: false
+      ignore_errors: true
+
+    # enableSeasonFolders is required by Jellyseerr's schema validation (a plain
+    # 400 "should have required property" without it) — it is Sonarr's own
+    # "organize episodes into season folders" setting, not something Jellyseerr
+    # invented, so true matches how Sonarr lays out {{ sonarr_root }} above.
     - name: "Jellyseerr: register Sonarr as the TV backend"
       ansible.builtin.uri:
         url: "http://localhost:{{ jellyseerr_port }}/api/v1/settings/sonarr"
@@ -652,8 +877,28 @@
           externalUrl: ""
           syncEnabled: true
           preventSearch: false
+          enableSeasonFolders: true
         status_code: [200, 201]
-      when: jsr_cookie is defined
+      when:
+        - jsr_cookie is defined
+        - jsr_sonarr_list is succeeded
+        - "'Sonarr' not in (jsr_sonarr_list.json | default([]) | map(attribute='name') | list)"
+      ignore_errors: true
+
+    # Mirrors clicking "Finish" on Jellyseerr's own setup wizard. Skipping this
+    # leaves `initialized: false` forever even though Jellyfin/Radarr/Sonarr are
+    # genuinely all wired up — Jellyseerr's UI checks that flag on every page
+    # load and sends everyone back to the setup wizard until it is set.
+    - name: "Jellyseerr: finish setup"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyseerr_port }}/api/v1/settings/initialize"
+        method: POST
+        headers:
+          Cookie: "{{ jsr_cookie }}"
+        status_code: 200
+      when:
+        - jsr_cookie is defined
+        - not (jsr_public.json.initialized | default(false))
       ignore_errors: true
 
     - name: "Jellyseerr: note if it could not be linked automatically"
@@ -663,10 +908,7 @@
           http://localhost:{{ jellyseerr_port }} and run its setup wizard:
           sign in with the Jellyfin admin account, then add Radarr and Sonarr
           (hostnames `radarr` and `sonarr`, the API keys are in
-          config/*/config.xml). Note that Jellyseerr authenticates against
-          Jellyfin using the old X-Emby-Authorization header, which Jellyfin 12
-          removed — if that is the failure, pin Jellyfin to a 10.x tag in
-          docker-compose.yml.
+          config/*/config.xml).
       when: jsr_cookie is not defined
 
     # ---------- 9. Summary ----------

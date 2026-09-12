@@ -1,53 +1,20 @@
 ---
-# Reelhub settings. Copy this file to vars.yml and edit it:
+# Reelhub secrets. Copy this file to vars.yml and set both passwords:
 #
 #     cp ansible/vars.yml.example ansible/vars.yml
 #
-# vars.yml is gitignored; this template is what gets committed. Change at least
-# the two passwords below before the first `make deploy`.
-#
-# Note: there is no project path setting here. The playbook derives the repo root
-# from its own location, so the checkout works anywhere and can be moved freely.
+# vars.yml is gitignored; this template is what gets committed. Everything that
+# isn't a secret (usernames, ports, paths, categories) lives as a plain default
+# in the `vars:` block at the top of ansible/deploy.yml instead — this file only
+# exists to keep the two passwords below out of git. To change a non-secret
+# setting, edit it there; to change a password, edit it here.
 
-# Timezone used by the *arr apps for schedules and timestamps.
-# The containers get theirs from .env / docker-compose.yml instead.
-timezone: "Asia/Almaty"
-
-# ---------- qBittorrent ----------
-qbt_web_port: 8080
-
-# The permanent Web UI credentials. On the very first run the playbook reads the
-# one-time password the container prints to its log, then replaces it with these.
-qbt_new_user: admin
+# The permanent qBittorrent Web UI password. On the very first run the playbook
+# reads the one-time password the container prints to its log, then replaces it
+# with this one.
 qbt_new_pass: "CHANGE_ME_before_first_deploy"
 
-# Categories Radarr and Sonarr tag their downloads with. Each one gets its own
-# save path, which is what keeps finished movies and episodes in separate trees.
-qbt_category_movies: movies
-qbt_category_tv: tv
-
-# Default download directory, as seen from inside the container
-# (./data on the host is mounted at /data).
-qbt_download_path: /data/downloads
-
-# ---------- Service ports ----------
-# Changing a port here is only half the job — update the matching `ports:` line
-# in docker-compose.yml too, or the container will still publish the old one.
-radarr_port: 7878
-sonarr_port: 8989
-prowlarr_port: 9696
-jellyfin_port: 8096
-jellyseerr_port: 5055
-
-# ---------- Library paths ----------
-# Container-side paths where Radarr and Sonarr file finished media, and where
-# Jellyfin reads it from. Same filesystem as qbt_download_path on purpose:
-# imports become instant moves rather than slow copies.
-radarr_root: /data/media/movies
-sonarr_root: /data/media/tv
-
-# ---------- Jellyfin ----------
-# Created by the headless first-boot wizard. Ignored if Jellyfin has already
-# been set up — in that case your existing account stays as it is.
-jellyfin_admin_user: admin
+# Password for the Jellyfin administrator account the headless setup wizard
+# creates. Ignored if Jellyfin has already been set up — in that case your
+# existing account and password stay as they are.
 jellyfin_admin_pass: "CHANGE_ME_before_first_deploy"

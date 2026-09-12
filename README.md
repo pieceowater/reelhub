@@ -76,6 +76,60 @@ Then do the one thing that cannot be automated:
 Now request something in [Jellyseerr](http://localhost:5055) and watch it land in
 [Jellyfin](http://localhost:8096).
 
+## Default logins
+
+Only qBittorrent and Jellyfin have accounts; Radarr, Sonarr and Prowlarr are
+open on your LAN with no login. Usernames are plain defaults in
+`ansible/deploy.yml`'s `vars:` block, not secrets — change them there if you
+want something else.
+
+| Service | URL | Username | Password |
+|---|---|---|---|
+| qBittorrent | [localhost:8080](http://localhost:8080) | `admin` | `qbt_new_pass` in `ansible/vars.yml` |
+| Jellyfin | [localhost:8096](http://localhost:8096) | `pcwt` | `jellyfin_admin_pass` in `ansible/vars.yml` |
+
+The Jellyfin login also gets you into Jellyseerr and into any Jellyfin client —
+Infuse, the Jellyfin apps, a browser — pointed at this server's LAN address
+(`http://<this-machine's-IP>:8096`, not `localhost`, from another device).
+
+## Requesting movies and shows
+
+Indexers (above) are the only manual step. Once they're in, there are two ways
+to actually get something onto the server — day to day you'll want the first.
+
+### The easy way: Jellyseerr
+
+Open [localhost:5055](http://localhost:5055), sign in with the Jellyfin admin
+account (see [Default logins](#default-logins) below), search for a title, and
+click **Request**. This is what to hand the rest of the household — one search
+box, no other apps to learn, and requests can be approved automatically or held
+for you to review (Settings → Users, or per-request in Settings → General).
+
+### The direct way: Radarr and Sonarr
+
+Useful for one-off searches, checking why something hasn't downloaded, or
+picking a specific release yourself instead of taking whatever Jellyseerr grabs.
+
+- **Movies** — [localhost:7878](http://localhost:7878) (Radarr) → **Add New** →
+  search the title → **Add Movie**. Radarr searches your indexers immediately
+  and again on its normal schedule until it finds a match.
+- **TV shows** — [localhost:8989](http://localhost:8989) (Sonarr) → **Add New**
+  → search the title → **Add Series**. Sonarr then also watches for new
+  episodes on its own as they air.
+
+### What happens after you add something
+
+1. Radarr/Sonarr find a release via Prowlarr and send it to qBittorrent
+2. qBittorrent downloads it into `data/downloads`
+3. Once complete, Radarr/Sonarr rename and move it into `data/media` — the same
+   directory tree Jellyfin's libraries point at, so this is a fast move, not a
+   slow re-copy
+4. Jellyfin picks it up (usually within a few minutes) and it's ready to watch,
+   including in Infuse or any other Jellyfin client on your network
+
+Nothing showing up? See [Troubleshooting](#troubleshooting) — the most common
+cause by far is skipping the indexer step above.
+
 ## Everyday commands
 
 | Command | What it does |
@@ -106,11 +160,16 @@ Run `make` with no arguments for the same list.
    you add later propagate automatically.
 7. **Jellyfin** — runs the first-boot wizard headlessly, creates the admin user
    and adds the Movies and TV Shows libraries.
-8. **Jellyseerr** — links it to Jellyfin, Radarr and Sonarr.
+8. **Jellyseerr** — signs it in against Jellyfin, registers Radarr and Sonarr, and
+   finishes its setup wizard, so opening it the first time drops you straight
+   into the app instead of another setup screen.
 
-Steps 1–6 use documented, stable APIs. Steps 7–8 drive setup-wizard endpoints
-that change between releases, so they are best-effort: if they fail the playbook
-keeps going and tells you to finish those two in the browser.
+Every step here is idempotent and everything is verified end-to-end (see
+[Versions](#versions) for why that verification mattered), but steps 7–8 drive
+Jellyfin and Jellyseerr's internal setup-wizard endpoints rather than a stable,
+documented API, and those are more likely to shift on a future image update. If
+one ever does fail, the playbook keeps going and tells you to finish that piece
+by hand in the browser.
 
 Re-running is safe: every step checks what is already configured and skips it,
 rather than relying on the APIs to reject duplicates. That matters more than it
@@ -131,11 +190,10 @@ success while configuring nothing.
 reelhub/
 ├── docker-compose.yml      the six services
 ├── Makefile                every command you need day to day
-├── .env.example            optional: PUID/PGID/TZ overrides
 ├── ansible/
 │   ├── deploy.yml          the playbook (heavily commented)
-│   ├── vars.yml.example    template — copy to vars.yml and edit
-│   ├── vars.yml            your real settings + passwords (gitignored)
+│   ├── vars.yml.example    template — copy to vars.yml and set the passwords
+│   ├── vars.yml            your two real passwords, nothing else (gitignored)
 │   ├── inventory.ini       localhost, local connection
 │   └── ansible.cfg         so `ansible-playbook deploy.yml` just works
 ├── config/                 per-service state, created on first run (gitignored)
@@ -171,22 +229,28 @@ that if something breaks you know what caused it.
 
 ## Configuration
 
-**`ansible/vars.yml`** — ports, credentials, library paths. Copy it from
-`vars.yml.example` and change at least the two passwords before your first
+**`ansible/vars.yml`** — exactly two secrets: the qBittorrent and Jellyfin
+admin passwords. Copy it from `vars.yml.example` and set both before your first
 `make deploy`.
 
-**`.env`** (optional) — copy from `.env.example` to override the user the
-containers run as, or the timezone:
+**The `vars:` block at the top of `ansible/deploy.yml`** — everything else:
+ports, usernames, download categories, library paths. None of it is a secret,
+so it lives in the playbook rather than in a file you have to remember exists.
+Change a value there directly; a port change also needs the matching `ports:`
+line in `docker-compose.yml` updated in the same commit.
 
-```bash
-PUID=1000        # `id -u`  — match your host user so files aren't root-owned
-PGID=1000        # `id -g`
-TZ=Asia/Almaty
+**`docker-compose.yml`** — the user the containers run as and the timezone, at
+the top of the file:
+
+```yaml
+PUID: ${PUID:-1000}     # `id -u` — match your host user so files aren't root-owned
+PGID: ${PGID:-1000}     # `id -g`
+TZ: ${TZ:-Asia/Almaty}
 ```
 
-The defaults are baked into `docker-compose.yml`, so this file is only needed if
-you want something else. On Linux, setting `PUID`/`PGID` to your own IDs is worth
-doing; on macOS, Docker Desktop handles ownership and you can ignore it.
+Edit the defaults there, or override them for one run from your shell
+(`PUID=$(id -u) make up`). On Linux, matching your own IDs is worth doing; on
+macOS, Docker Desktop handles ownership and you can leave it alone.
 
 ## Keeping your passwords out of git
 
@@ -200,12 +264,15 @@ make deploy ANSIBLE_ARGS=--ask-vault-pass
 
 ## Troubleshooting
 
-**A Jellyfin or Jellyseerr task says `failed (ignored)`.** Those two are driven
-through setup-wizard APIs that are internal and version-dependent, so they are
-best-effort by design. Open [localhost:8096](http://localhost:8096) and
+**A Jellyfin or Jellyseerr task says `failed (ignored)`.** On a clean run with
+the pinned image versions this shouldn't happen — every step there is
+end-to-end verified, not just checked for an HTTP status. If it does, Jellyfin
+or Jellyseerr shipped an update that moved one of their internal setup-wizard
+endpoints (unlike Radarr/Sonarr/Prowlarr/qBittorrent, these two don't expose a
+stable public API for it). Open [localhost:8096](http://localhost:8096) and
 [localhost:5055](http://localhost:5055) and click through the setup once;
 everything else is already configured. If you changed the Jellyfin tag to 12.x,
-this is expected and Jellyseerr will not work at all — see [Versions](#versions).
+Jellyseerr will not be able to sign in at all — see [Versions](#versions).
 
 **qBittorrent returns 403 "Your IP address has been banned".** It bans a client
 for an hour after a few failed logins, which is easy to trigger while you are
@@ -224,8 +291,9 @@ clean.
 **Nothing is ever found.** You have no indexers yet. See step 1–3 of the quick
 start; this is the one manual step.
 
-**A port is already taken.** Change it in `ansible/vars.yml` *and* in the
-matching `ports:` line in `docker-compose.yml`, then `make deploy`.
+**A port is already taken.** Change it in the `vars:` block at the top of
+`ansible/deploy.yml` *and* in the matching `ports:` line in
+`docker-compose.yml`, then `make deploy`.
 
 ## Legal
 
