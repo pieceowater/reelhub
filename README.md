@@ -53,7 +53,7 @@ No Python packages, no Ansible collections, no Galaxy roles. The playbook uses
 ## Quick start
 
 ```bash
-git clone https://github.com/<you>/reelhub.git
+git clone https://github.com/pieceowater/reelhub.git
 cd reelhub
 
 # 1. Set your passwords (the file is gitignored; the template is not)
@@ -86,7 +86,7 @@ Now request something in [Jellyseerr](http://localhost:5055) and watch it land i
 | `make restart` | `down` then `up` |
 | `make ps` | Show what is running |
 | `make logs` | Tail every container's logs (`make logs S=radarr` for one) |
-| `make pull` | Pull newer images, then recreate the containers |
+| `make pull` | Pull the pinned images again and recreate the containers (it does **not** upgrade anything — see [Versions](#versions)) |
 | `make urls` | Print the service URLs |
 | `make destroy` | Reset every service to first-boot state — removes `config/`, keeps `data/`. Asks for confirmation. |
 
@@ -97,8 +97,8 @@ Run `make` with no arguments for the same list.
 1. Creates the `data/` and `config/` tree the containers bind-mount.
 2. `docker compose up -d`.
 3. **qBittorrent** — reads the one-time password the container prints on first
-   boot, replaces it with yours, sets the download directory, and creates the
-   `movies` and `tv` categories that keep the two libraries apart.
+   boot, creates the `movies` and `tv` categories that keep the two libraries
+   apart, then replaces the password with yours and sets the download directory.
 4. Reads the API keys Radarr, Sonarr and Prowlarr generate on first boot.
 5. **Radarr / Sonarr** — registers qBittorrent as their download client and adds
    the root folder each one imports into.
@@ -112,8 +112,11 @@ Steps 1–6 use documented, stable APIs. Steps 7–8 drive setup-wizard endpoint
 that change between releases, so they are best-effort: if they fail the playbook
 keeps going and tells you to finish those two in the browser.
 
-Re-running is safe. Creating something that already exists returns 400/409, and
-the playbook treats those as success rather than errors.
+Re-running is safe: every step checks what is already configured and skips it,
+rather than relying on the APIs to reject duplicates. That matters more than it
+sounds — Radarr answers `400` both for "this already exists" and for "I could not
+reach that download client", so a playbook that waves 400s through reports
+success while configuring nothing.
 
 ## What it deliberately does not do
 
@@ -140,6 +143,31 @@ reelhub/
     ├── downloads/
     └── media/{movies,tv}
 ```
+
+## Versions
+
+Every image in `docker-compose.yml` is pinned to an exact tag:
+
+| Service | Pinned at |
+|---|---|
+| qBittorrent | `5.2.3` |
+| Prowlarr | `2.5.2` |
+| Radarr | `6.3.0` |
+| Sonarr | `4.0.19` |
+| Jellyfin | `10.11.11` |
+| Jellyseerr | `2.7.3` |
+
+This is deliberate, and it is the main reason the stack keeps working without
+attention. With `:latest`, an unrelated `docker compose pull` can replace a
+service with a new major release and break the wiring between them — which is
+exactly what happened while this was being built: qBittorrent 5 renamed its
+session cookie, and **Jellyfin 12 removed the `X-Emby-Authorization` header that
+Jellyseerr still authenticates with**, so on `jellyfin:latest` Jellyseerr cannot
+log in at all and the whole request flow is dead. Jellyfin is therefore held on
+10.x until Jellyseerr supports 12.
+
+To move a service up, change its tag and run `make pull`. Do one at a time, so
+that if something breaks you know what caused it.
 
 ## Configuration
 
@@ -172,10 +200,17 @@ make deploy ANSIBLE_ARGS=--ask-vault-pass
 
 ## Troubleshooting
 
-**A Jellyfin or Jellyseerr task says `failed (ignored)`.** Expected on some image
-versions — their wizard APIs shift between releases. Open
-[localhost:8096](http://localhost:8096) and [localhost:5055](http://localhost:5055)
-and click through the setup once. Everything else is already configured.
+**A Jellyfin or Jellyseerr task says `failed (ignored)`.** Those two are driven
+through setup-wizard APIs that are internal and version-dependent, so they are
+best-effort by design. Open [localhost:8096](http://localhost:8096) and
+[localhost:5055](http://localhost:5055) and click through the setup once;
+everything else is already configured. If you changed the Jellyfin tag to 12.x,
+this is expected and Jellyseerr will not work at all — see [Versions](#versions).
+
+**qBittorrent returns 403 "Your IP address has been banned".** It bans a client
+for an hour after a few failed logins, which is easy to trigger while you are
+getting `vars.yml` right. The ban list is only in memory:
+`docker compose restart qbittorrent` clears it, then `make deploy` again.
 
 **`Could not read one or more API keys`.** One of the *arr containers did not
 finish starting. Check `make logs S=radarr`, then re-run `make deploy`.
