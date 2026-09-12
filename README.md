@@ -65,16 +65,14 @@ make deploy
 ```
 
 `make deploy` takes a few minutes on a first run — most of it is pulling images.
-When it finishes it prints every URL and login.
+When it finishes, four public indexers (see below) are already searching and
+you can request something right away in [Jellyseerr](http://localhost:5055) and
+watch it land in [Jellyfin](http://localhost:8096).
 
-Then do the one thing that cannot be automated:
-
-1. Open [Prowlarr](http://localhost:9696) → **Indexers** → **Add Indexer**
-2. Add the trackers you use, with your own accounts or API keys
-3. They sync to Radarr and Sonarr on their own — you never add them twice
-
-Now request something in [Jellyseerr](http://localhost:5055) and watch it land in
-[Jellyfin](http://localhost:8096).
+Have accounts on private trackers? That's the one thing that can't be
+pre-configured — they need your personal login or API key. Add them at
+[Prowlarr](http://localhost:9696) → **Indexers** → **Add Indexer**; they sync
+to Radarr and Sonarr on their own, same as the four already there.
 
 ## Default logins
 
@@ -160,8 +158,10 @@ Run `make` with no arguments for the same list.
 4. Reads the API keys Radarr, Sonarr and Prowlarr generate on first boot.
 5. **Radarr / Sonarr** — registers qBittorrent as their download client and adds
    the root folder each one imports into.
-6. **Prowlarr** — registers Radarr and Sonarr as apps with full sync, so indexers
-   you add later propagate automatically.
+6. **Prowlarr** — registers Radarr and Sonarr as apps with full sync, then adds
+   four public indexers (see [Default indexers](#default-indexers)) so both
+   apps already have somewhere to search. Anything else you add propagates
+   automatically the same way.
 7. **Jellyfin** — runs the first-boot wizard headlessly, creates the admin user
    and adds the Movies and TV Shows libraries.
 8. **Jellyseerr** — signs it in against Jellyfin, registers Radarr and Sonarr, and
@@ -181,10 +181,38 @@ sounds — Radarr answers `400` both for "this already exists" and for "I could 
 reach that download client", so a playbook that waves 400s through reports
 success while configuring nothing.
 
+## Default indexers
+
+Four public indexers get added to Prowlarr automatically — no account needed
+for any of them, and each was hand-checked to return real, well-seeded results
+before being added here:
+
+| Indexer | Good for |
+|---|---|
+| [YTS](https://yts.mx/) | Movies, small file sizes |
+| [The Pirate Bay](https://thepiratebay.org/) | General — movies and TV |
+| [LimeTorrents](https://www.limetorrents.info/) | General — TV mainly (see note below) |
+| [TorrentDownload](https://www.torrentdownload.info/) | General — movies and TV |
+
+They're deliberately conservative: a few other well-known public trackers
+(1337x, EZTV, the KickassTorrents mirrors) sit behind Cloudflare and need a
+[FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) proxy to return
+anything at all — this stack doesn't run one, so they were left out rather than
+added silently broken. Add FlareSolverr as a seventh service and they become
+worth adding too.
+
+LimeTorrents lists a Movies category but Prowlarr's own sync only ends up
+wiring it to Sonarr, not Radarr — a quirk of how that indexer reports its
+categories, not a misconfiguration; Radarr already has three solid sources.
+
+Want more, or your own private trackers? Same process either way: Prowlarr →
+**Indexers** → **Add Indexer** → search by name. Public ones need nothing;
+private ones need the account/API key from that tracker.
+
 ## What it deliberately does not do
 
-- **Add indexers to Prowlarr.** These need your personal tracker accounts and API
-  keys. Nobody can pre-bake that, and you would not want them to.
+- **Add your private tracker accounts to Prowlarr.** By definition, only you
+  have those credentials.
 - **Configure hardware transcoding in Jellyfin.** Entirely dependent on your GPU
   and host OS — set it in Dashboard → Playback.
 

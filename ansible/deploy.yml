@@ -91,6 +91,18 @@
     # password in Prowlarr's own UI later is never overwritten.
     prowlarr_admin_user: admin
 
+    # Public indexers added automatically — no account needed for any of these.
+    # See the comment above the task that uses this for how the list was
+    # chosen and how to extend it. `docker compose exec prowlarr grep -i name
+    # /config/... ` isn't needed to find more: Settings -> Indexers -> Add
+    # Indexer in the UI shows every name Prowlarr supports, and any entry
+    # marked "Public" there works the same way as these.
+    prowlarr_public_indexers:
+      - YTS
+      - The Pirate Bay
+      - LimeTorrents
+      - TorrentDownload
+
   tasks:
 
     # ---------- 1. Directory layout and container startup ----------
@@ -594,6 +606,85 @@
             - { name: syncCategories, value: [5000, 5010, 5020, 5030, 5040, 5045, 5050] }
         status_code: [200, 201]
       when: "'Sonarr' not in (prowlarr_apps.json | map(attribute='name') | list)"
+
+    # ---------- 6b. Prowlarr: add public indexers ----------
+    #
+    # Private trackers still need your own account and API key — nobody can
+    # pre-bake that, and it stays the one genuinely manual step (see the
+    # README). Public indexers need nothing at all: Prowlarr ships built-in
+    # definitions that scrape the site directly, so a curated set of them can
+    # be added the same way everything else here is.
+    #
+    # Kept to four well-known, high-uptime, general-purpose trackers that need
+    # no FlareSolverr proxy — this stack doesn't run one, and several other
+    # popular sites (1337x, EZTV, the KickassTorrents mirrors) sit behind
+    # Cloudflare and would silently return zero results without it. Each of
+    # these four was hand-verified to return real, well-seeded results before
+    # being added here. Add FlareSolverr as a service and the Cloudflare-gated
+    # ones become viable too, but that's a genuinely separate piece of
+    # infrastructure to run.
+    - name: "Prowlarr: fetch the indexer definition catalog"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ prowlarr_port }}/api/v1/indexer/schema"
+        headers:
+          X-Api-Key: "{{ prowlarr_api_key }}"
+        status_code: 200
+      register: prowlarr_indexer_schema
+      changed_when: false
+
+    - name: "Prowlarr: list existing indexers"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ prowlarr_port }}/api/v1/indexer"
+        headers:
+          X-Api-Key: "{{ prowlarr_api_key }}"
+        status_code: 200
+      register: prowlarr_indexer_list
+      changed_when: false
+
+    - name: "Prowlarr: get the default sync profile"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ prowlarr_port }}/api/v1/appprofile"
+        headers:
+          X-Api-Key: "{{ prowlarr_api_key }}"
+        status_code: 200
+      register: prowlarr_app_profiles
+      changed_when: false
+
+    # Each schema entry is a complete, ready-to-use indexer definition —
+    # Prowlarr hands it right back as the resource to POST, it just needs a
+    # real sync profile attached (the schema's own appProfileId: 0 means
+    # "unset"). Guarded by name against the existing list so re-running never
+    # duplicates one, and so a tracker you remove in Prowlarr's UI stays gone.
+    - name: "Prowlarr: add public indexers"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ prowlarr_port }}/api/v1/indexer"
+        method: POST
+        headers:
+          X-Api-Key: "{{ prowlarr_api_key }}"
+        body_format: json
+        body: >-
+          {{ (prowlarr_indexer_schema.json | selectattr('name', 'equalto', item) | first)
+             | combine({'appProfileId': prowlarr_app_profiles.json[0].id}) }}
+        status_code: [200, 201]
+      loop: "{{ prowlarr_public_indexers }}"
+      loop_control:
+        label: "{{ item }}"
+      when: item not in (prowlarr_indexer_list.json | map(attribute='name') | list)
+
+    # Prowlarr syncs to Radarr/Sonarr automatically whenever an indexer
+    # changes, but forcing it here means the new ones are searchable
+    # immediately rather than waiting on Prowlarr's own schedule.
+    - name: "Prowlarr: push the new indexers to Radarr and Sonarr now"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ prowlarr_port }}/api/v1/command"
+        method: POST
+        headers:
+          X-Api-Key: "{{ prowlarr_api_key }}"
+        body_format: json
+        body:
+          name: ApplicationIndexerSync
+        status_code: 201
+      ignore_errors: true
 
     # ---------- 7. Jellyfin: headless first-boot wizard ----------
     #
