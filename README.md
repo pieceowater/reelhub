@@ -9,7 +9,7 @@ downloaded, and put in front of you to watch — no manual searching for files.
 git clone https://github.com/pieceowater/reelhub.git
 cd reelhub
 
-cp ansible/vars.yml.example ansible/vars.yml   # 1. set your three passwords
+cp ansible/vars.yml.example ansible/vars.yml   # 1. set your password
 $EDITOR ansible/vars.yml
 
 make deploy                                     # 2. bring everything up
@@ -22,7 +22,7 @@ downloading images. When it's done, everything below already works.
 ## Login
 
 Same username and password everywhere: **`pcwt`** and whatever you set as
-`jellyfin_admin_pass` in `ansible/vars.yml`.
+`master_pass` in `ansible/vars.yml`.
 
 | | URL |
 |---|---|
@@ -149,8 +149,8 @@ reelhub/
 ├── Makefile                every command you need day to day
 ├── ansible/
 │   ├── deploy.yml          the playbook — defaults, usernames and rationale live here
-│   ├── vars.yml.example    template — copy to vars.yml and set the passwords
-│   ├── vars.yml            your three real passwords, nothing else (gitignored)
+│   ├── vars.yml.example    template — copy to vars.yml and set the password
+│   ├── vars.yml            your one real password, nothing else (gitignored)
 │   ├── inventory.ini       localhost, local connection
 │   └── ansible.cfg         so `ansible-playbook deploy.yml` just works
 ├── config/                 per-service state, created on first run (gitignored)
@@ -161,8 +161,10 @@ reelhub/
 
 ### Configuration
 
-**`ansible/vars.yml`** — the three passwords (qBittorrent, Prowlarr, Jellyfin).
-Copy it from `vars.yml.example` and set them before your first `make deploy`.
+**`ansible/vars.yml`** — one password (`master_pass`), used for qBittorrent,
+Prowlarr and Jellyfin alike. Copy it from `vars.yml.example` and set it before
+your first `make deploy`. Want a different password for just one of them
+instead? See the comments in `vars.yml.example`.
 
 **The `vars:` block at the top of `ansible/deploy.yml`** — everything else:
 the shared username, ports, download categories, library paths. None of it is
