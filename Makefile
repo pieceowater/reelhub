@@ -43,13 +43,20 @@ pull: ## Pull newer images and recreate the containers
 	@$(COMPOSE) pull
 	@$(COMPOSE) up -d
 
-urls: ## Print the service URLs
+# LAN_IP tries macOS's usual interfaces first, then falls back to a Linux-style
+# lookup; if neither finds one, prints a placeholder instead of failing.
+LAN_IP := $(shell ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || hostname -I 2>/dev/null | awk '{print $$1}' || echo "<this-machine's-IP>")
+
+urls: ## Print the service URLs (+ the LAN address for Infuse/other devices)
 	@echo "  Jellyseerr   http://localhost:5055   request things here"
 	@echo "  Jellyfin     http://localhost:8096   watch things here"
 	@echo "  Prowlarr     http://localhost:9696   add your indexers here"
 	@echo "  Radarr       http://localhost:7878"
 	@echo "  Sonarr       http://localhost:8989"
 	@echo "  qBittorrent  http://localhost:8080"
+	@echo ""
+	@echo "  From another device on your network (Infuse, a phone, another"
+	@echo "  computer), Jellyfin is at: $(LAN_IP):8096"
 
 # Deliberately noisy and interactive: this throws away every service's settings,
 # API keys and watch history. It does NOT touch data/ — your media survives.
