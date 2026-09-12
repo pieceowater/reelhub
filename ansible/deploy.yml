@@ -86,6 +86,11 @@
     # up, your existing account stays exactly as it is.
     jellyfin_admin_user: pcwt
 
+    # Prowlarr's Web UI login, set once on the first run it finds
+    # authentication still turned off. Ignored after that — changing your
+    # password in Prowlarr's own UI later is never overwritten.
+    prowlarr_admin_user: admin
+
   tasks:
 
     # ---------- 1. Directory layout and container startup ----------
@@ -368,6 +373,46 @@
         - { name: prowlarr, port: "{{ prowlarr_port }}", api: v1, key: "{{ prowlarr_api_key }}" }
       loop_control:
         label: "{{ item.name }}"
+
+    # ---------- 3b. Prowlarr: set a UI login ----------
+    #
+    # Current Prowlarr refuses "no authentication" outright — the Web UI blocks
+    # on an "Authentication Required" modal until a method is chosen, and the
+    # underlying config also rejects authenticationMethod: none via the API.
+    # This does not touch how Radarr/Sonarr talk to Prowlarr (that's the
+    # X-Api-Key header, unaffected by this setting) — it's purely the browser
+    # login. Guarded on authenticationMethod still being "none" so a password
+    # you change later here is never overwritten by a later `make deploy`.
+    - name: "Prowlarr: check current authentication settings"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ prowlarr_port }}/api/v1/config/host"
+        headers:
+          X-Api-Key: "{{ prowlarr_api_key }}"
+        status_code: 200
+      register: prowlarr_host_config
+      changed_when: false
+
+    - name: "Prowlarr: set a UI login"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ prowlarr_port }}/api/v1/config/host"
+        method: PUT
+        headers:
+          X-Api-Key: "{{ prowlarr_api_key }}"
+        body_format: json
+        # The API expects the full resource back, not a partial patch — start
+        # from what GET returned and only override the auth fields.
+        body: "{{ prowlarr_host_config.json | combine(prowlarr_auth) }}"
+        status_code: [200, 202]
+      vars:
+        prowlarr_auth:
+          authenticationMethod: forms
+          # Skips the login prompt for anything on your LAN/localhost; still
+          # requires it if Prowlarr is ever reached from outside the network.
+          authenticationRequired: disabledForLocalAddresses
+          username: "{{ prowlarr_admin_user }}"
+          password: "{{ prowlarr_admin_pass }}"
+          passwordConfirmation: "{{ prowlarr_admin_pass }}"
+      when: prowlarr_host_config.json.authenticationMethod == "none"
 
     # ---------- 4. Radarr: download client + root folder ----------
 

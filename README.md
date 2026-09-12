@@ -78,15 +78,19 @@ Now request something in [Jellyseerr](http://localhost:5055) and watch it land i
 
 ## Default logins
 
-Only qBittorrent and Jellyfin have accounts; Radarr, Sonarr and Prowlarr are
-open on your LAN with no login. Usernames are plain defaults in
-`ansible/deploy.yml`'s `vars:` block, not secrets — change them there if you
-want something else.
+Radarr and Sonarr are open on your LAN with no login. qBittorrent, Prowlarr and
+Jellyfin all have one — usernames are plain defaults in `ansible/deploy.yml`'s
+`vars:` block, not secrets — change them there if you want something else.
 
 | Service | URL | Username | Password |
 |---|---|---|---|
 | qBittorrent | [localhost:8080](http://localhost:8080) | `admin` | `qbt_new_pass` in `ansible/vars.yml` |
+| Prowlarr | [localhost:9696](http://localhost:9696) | `admin` | `prowlarr_admin_pass` in `ansible/vars.yml` |
 | Jellyfin | [localhost:8096](http://localhost:8096) | `pcwt` | `jellyfin_admin_pass` in `ansible/vars.yml` |
+
+Prowlarr only asks for this when reached from outside your LAN — locally it
+skips straight in (`authenticationRequired: disabledForLocalAddresses`, set
+because current Prowlarr refuses to run with no login at all).
 
 The Jellyfin login also gets you into Jellyseerr and into any Jellyfin client —
 Infuse, the Jellyfin apps, a browser — pointed at this server's LAN address
@@ -273,6 +277,13 @@ stable public API for it). Open [localhost:8096](http://localhost:8096) and
 [localhost:5055](http://localhost:5055) and click through the setup once;
 everything else is already configured. If you changed the Jellyfin tag to 12.x,
 Jellyseerr will not be able to sign in at all — see [Versions](#versions).
+
+**Prowlarr shows an "Authentication Required" modal you can't get past.** Means
+it started before the playbook's Prowlarr step ran, or that step failed — check
+`make logs S=prowlarr` and re-run `make deploy`. To set it by hand instead: pick
+**Forms (Login Page)**, set **Authentication Required** to **Disabled for Local
+Addresses**, and choose a username/password — this doesn't affect the
+Radarr/Sonarr integration, which authenticates with an API key, not this login.
 
 **qBittorrent returns 403 "Your IP address has been banned".** It bans a client
 for an hour after a few failed logins, which is easy to trigger while you are

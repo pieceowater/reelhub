@@ -1,12 +1,12 @@
 ---
-# Reelhub secrets. Copy this file to vars.yml and set both passwords:
+# Reelhub secrets. Copy this file to vars.yml and set all three passwords:
 #
 #     cp ansible/vars.yml.example ansible/vars.yml
 #
 # vars.yml is gitignored; this template is what gets committed. Everything that
 # isn't a secret (usernames, ports, paths, categories) lives as a plain default
 # in the `vars:` block at the top of ansible/deploy.yml instead — this file only
-# exists to keep the two passwords below out of git. To change a non-secret
+# exists to keep the passwords below out of git. To change a non-secret
 # setting, edit it there; to change a password, edit it here.
 
 # The permanent qBittorrent Web UI password. On the very first run the playbook
@@ -18,3 +18,9 @@ qbt_new_pass: "CHANGE_ME_before_first_deploy"
 # creates. Ignored if Jellyfin has already been set up — in that case your
 # existing account and password stay as they are.
 jellyfin_admin_pass: "CHANGE_ME_before_first_deploy"
+
+# Password for Prowlarr's Web UI login, set the first time the playbook finds
+# authentication still turned off. Ignored after that — Prowlarr no longer
+# allows running with no login at all, so this always gets set on a fresh
+# instance.
+prowlarr_admin_pass: "CHANGE_ME_before_first_deploy"
