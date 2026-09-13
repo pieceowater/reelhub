@@ -1,18 +1,38 @@
 # Reelhub — see README.md for the full picture.
 # Every target here is safe to run from a clean checkout.
+#
+# Everything actually runs on the server named in ansible/inventory.ini, not
+# on this machine — `deploy` goes through Ansible (which also bootstraps
+# Docker there the first time); the day-to-day targets below (up/down/ps/
+# logs/pull/destroy) just SSH over and run `docker compose` in the checkout
+# Ansible made on the server, since a raw SSH one-liner is simpler than
+# reaching for Ansible for something this direct.
 
 .DEFAULT_GOAL := help
-COMPOSE := docker compose
 ANSIBLE := ansible-playbook
+SSH := ssh
 
-# Extra flags forwarded to ansible-playbook, e.g.
-#   make deploy ANSIBLE_ARGS=--ask-vault-pass
+# Extra flags forwarded to ansible-playbook — for password-based SSH:
+#   make deploy ANSIBLE_ARGS="--ask-pass --ask-become-pass"
+# (--ask-become-pass, the sudo password, is only actually used the first time,
+# to install Docker — harmless to keep passing it after that.)
+# Using an SSH key instead? Leave ANSIBLE_ARGS empty; the key lives in
+# inventory.ini instead.
 ANSIBLE_ARGS ?=
 
 # Limit `make logs` to one service, e.g.  make logs S=radarr
 S ?=
 
-.PHONY: help deploy up down restart ps logs pull urls destroy check
+# Parsed straight out of inventory.ini so up/down/ps/logs/pull/destroy hit the
+# same server `make deploy` does, without repeating the address everywhere.
+# REMOTE_DIR matches deploy.yml's own default (reelhub_dir) — if you changed
+# that there, change it here too.
+REMOTE_HOST := $(shell awk '/^\[reelhub\]/{f=1;next} f && NF && $$1 !~ /^\[/{print $$1; exit}' ansible/inventory.ini 2>/dev/null)
+REMOTE_USER := $(shell awk '/^\[reelhub\]/{f=1;next} f && NF && $$1 !~ /^\[/{for(i=1;i<=NF;i++) if ($$i ~ /^ansible_user=/) print substr($$i, index($$i,"=")+1); exit}' ansible/inventory.ini 2>/dev/null)
+REMOTE_DIR := reelhub
+REMOTE := $(SSH) $(REMOTE_USER)@$(REMOTE_HOST)
+
+.PHONY: help deploy up down restart ps logs pull urls destroy check check-remote
 
 help: ## Show this help
 	@echo "Reelhub"
@@ -20,61 +40,69 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[1m%-10s\033[0m %s\n", $$1, $$2}'
 	@echo ""
-	@echo "  First run:  cp ansible/vars.yml.example ansible/vars.yml && make deploy"
+	@echo "  First run:"
+	@echo "    cp ansible/vars.yml.example ansible/vars.yml && \$$EDITOR ansible/vars.yml"
+	@echo "    cp ansible/inventory.ini.example ansible/inventory.ini && \$$EDITOR ansible/inventory.ini"
+	@echo "    make deploy ANSIBLE_ARGS=\"--ask-pass --ask-become-pass\""
 
-deploy: check ## Start the stack and run the full configuration playbook
+deploy: check ## Set up Docker (first run only) and the whole stack on the server
 	@cd ansible && $(ANSIBLE) deploy.yml $(ANSIBLE_ARGS)
 
-up: ## Start the containers (no configuration)
-	@$(COMPOSE) up -d
+up: check-remote ## Start the containers on the server (no configuration)
+	@$(REMOTE) 'cd $(REMOTE_DIR) && docker compose up -d'
 
-down: ## Stop and remove the containers (settings and media are kept)
-	@$(COMPOSE) down
+down: check-remote ## Stop and remove the containers (settings and media are kept)
+	@$(REMOTE) 'cd $(REMOTE_DIR) && docker compose down'
 
 restart: down up ## Restart the whole stack
 
-ps: ## Show what is running
-	@$(COMPOSE) ps
+ps: check-remote ## Show what is running on the server
+	@$(REMOTE) 'cd $(REMOTE_DIR) && docker compose ps'
 
-logs: ## Tail logs for everything, or one service: make logs S=radarr
-	@$(COMPOSE) logs -f --tail=100 $(S)
+logs: check-remote ## Tail logs for everything, or one service: make logs S=radarr
+	@$(SSH) -t $(REMOTE_USER)@$(REMOTE_HOST) 'cd $(REMOTE_DIR) && docker compose logs -f --tail=100 $(S)'
 
-pull: ## Pull newer images and recreate the containers
-	@$(COMPOSE) pull
-	@$(COMPOSE) up -d
+pull: check-remote ## Pull the pinned images again and recreate the containers
+	@$(REMOTE) 'cd $(REMOTE_DIR) && docker compose pull && docker compose up -d'
 
-# LAN_IP tries macOS's usual interfaces first, then falls back to a Linux-style
-# lookup; if neither finds one, prints a placeholder instead of failing.
-LAN_IP := $(shell ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || hostname -I 2>/dev/null | awk '{print $$1}' || echo "<this-machine's-IP>")
-
-urls: ## Print the service URLs (+ the LAN address for Infuse/other devices)
-	@echo "  Jellyseerr   http://localhost:5055   request things here"
-	@echo "  Jellyfin     http://localhost:8096   watch things here"
-	@echo "  Prowlarr     http://localhost:9696   add your indexers here"
-	@echo "  Radarr       http://localhost:7878"
-	@echo "  Sonarr       http://localhost:8989"
-	@echo "  qBittorrent  http://localhost:8080"
+urls: check-remote ## Print every service's URL on the server
+	@echo "  Jellyseerr   http://$(REMOTE_HOST):5055   request things here"
+	@echo "  Jellyfin     http://$(REMOTE_HOST):8096   watch things here"
+	@echo "  Prowlarr     http://$(REMOTE_HOST):9696   add your indexers here"
+	@echo "  Radarr       http://$(REMOTE_HOST):7878"
+	@echo "  Sonarr       http://$(REMOTE_HOST):8989"
+	@echo "  qBittorrent  http://$(REMOTE_HOST):8080"
 	@echo ""
-	@echo "  From another device on your network (Infuse, a phone, another"
-	@echo "  computer), Jellyfin is at: $(LAN_IP):8096"
+	@echo "  Same addresses from any device on your network — Infuse, JellySee,"
+	@echo "  a phone, another computer."
 
 # Deliberately noisy and interactive: this throws away every service's settings,
-# API keys and watch history. It does NOT touch data/ — your media survives.
-destroy: ## Remove containers AND all service config (asks first)
-	@echo "This deletes config/ — all six services go back to first-boot state."
-	@echo "Your media in data/ is NOT touched."
+# API keys and watch history ON THE SERVER. It does NOT touch data/ — your
+# media survives.
+destroy: check-remote ## Remove containers AND all service config on the server (asks first)
+	@echo "This deletes config/ on $(REMOTE_HOST) — all six services go back to"
+	@echo "first-boot state. Your media in data/ is NOT touched."
 	@printf "Type 'yes' to continue: " && read ans && [ "$$ans" = "yes" ]
-	@$(COMPOSE) down -v
-	@rm -rf config
+	@$(REMOTE) 'cd $(REMOTE_DIR) && docker compose down -v && rm -rf config'
 	@echo "Removed. Run 'make deploy' to set everything up again."
 
-# Guard rail: the most common first-run mistake is forgetting to create vars.yml.
+# Guard rail: the most common first-run mistakes are forgetting to create
+# vars.yml/inventory.ini, or not having Ansible itself yet — Docker is no
+# longer this machine's problem, the playbook installs it on the server.
 check:
 	@test -f ansible/vars.yml || { \
 		echo "ansible/vars.yml is missing."; \
 		echo "Create it first:  cp ansible/vars.yml.example ansible/vars.yml"; \
 		exit 1; }
+	@test -f ansible/inventory.ini || { \
+		echo "ansible/inventory.ini is missing."; \
+		echo "Create it first:  cp ansible/inventory.ini.example ansible/inventory.ini"; \
+		exit 1; }
 	@command -v ansible-playbook >/dev/null || { \
 		echo "ansible is not installed.  brew install ansible"; exit 1; }
-	@docker info >/dev/null 2>&1 || { \
-		echo "Docker is not running. Start Docker Desktop and try again."; exit 1; }
+
+# Same idea, for the targets that skip Ansible and SSH over directly.
+check-remote: check
+	@if [ -z "$(REMOTE_HOST)" ] || [ "$(REMOTE_HOST)" = "SERVER_IP" ]; then \
+		echo "ansible/inventory.ini still has the placeholder SERVER_IP."; \
+		echo "Edit it with your server's real address first."; exit 1; fi

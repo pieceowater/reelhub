@@ -1,0 +1,24 @@
+# Reelhub inventory. Copy this file to inventory.ini and fill in your server:
+#
+#     cp ansible/inventory.ini.example ansible/inventory.ini
+#
+# inventory.ini is gitignored — it names your actual server, which is specific
+# to your network, not something the repo should carry. This template is what
+# gets committed.
+#
+# Replace SERVER_IP with the machine's address on your LAN (a hostname works
+# too, e.g. reelhub.local) and ubuntu with the account you SSH in as.
+[reelhub]
+SERVER_IP ansible_user=ubuntu
+
+# That's the whole file for password-based SSH — `make deploy` will prompt for
+# both the login password and the sudo password (needed only the first time,
+# to install Docker) when you pass ANSIBLE_ARGS="--ask-pass --ask-become-pass".
+#
+# Using an SSH key instead? Point at it here and drop the two --ask-* flags:
+#   SERVER_IP ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_ed25519
+#
+# Testing on this machine instead of a real server? Use this one line instead
+# of the [reelhub] block above:
+#   [reelhub]
+#   localhost ansible_connection=local

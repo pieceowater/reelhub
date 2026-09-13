@@ -3,7 +3,19 @@
 # Reelhub — bring the stack up and wire the services together
 # =============================================================================
 #
+# Runs against a REMOTE server over SSH, named in inventory.ini — not against
+# whatever machine you type `ansible-playbook` on. That machine (your laptop,
+# say) only needs Ansible and SSH access; the target needs nothing but Ubuntu
+# (or any apt-based Linux) and a user with sudo. Everything else — Docker, this
+# repo's own files, every container, data/ and config/ — ends up living on the
+# server, because Ansible modules execute on the target by default. That's also
+# why every `localhost:PORT` API call throughout this file is correct as-is:
+# when that task runs, "localhost" means the server, since the task itself runs
+# there, not on your laptop.
+#
 # What this playbook does, in order:
+#   0. Installs Docker on the target if it's missing, and checks out this repo
+#      there (see project_dir below) — the only part that needs sudo.
 #   1. Creates the media/download/config directory tree the containers bind-mount.
 #   2. Runs `docker compose up -d`.
 #   3. qBittorrent: reads the one-time password the container prints on first
@@ -21,11 +33,17 @@
 # Everything talks to the services over their documented REST APIs.
 #
 # Run:
-#   make deploy                      (from the repo root)
-#   cd ansible && ansible-playbook deploy.yml
+#   make deploy ANSIBLE_ARGS="--ask-pass --ask-become-pass"   (from the repo root)
+#   cd ansible && ansible-playbook deploy.yml --ask-pass --ask-become-pass
+#
+# The two --ask-* flags are for password-based SSH: --ask-pass is the login
+# password, needed on every run; --ask-become-pass is the sudo password, only
+# actually used the first time (installing Docker) — omit it once that's done,
+# or just leave it, since an unused become password is harmless. Using an SSH
+# key instead? Drop both flags and point at the key in inventory.ini.
 #
 # -----------------------------------------------------------------------------
-# Two rules this playbook follows, both learned the hard way:
+# Three rules this playbook follows, all learned the hard way:
 #
 # * Never treat a 400 as "already exists". The *arr APIs answer 400 for genuine
 #   validation failures too — "cannot reach the download client", say — so
@@ -35,18 +53,32 @@
 #
 # * Only POSIX shell tools, no GNU extensions. `grep -oP` is GNU-only and BSD
 #   grep on macOS rejects -P outright, so the API keys are parsed with `sed`.
+#   (Kept even now that the target is always Linux: costs nothing, and this
+#   playbook ran against a Mac earlier in its life.)
+#
+# * Never put a number through a YAML `key: "{{ expression }}"` leaf when a
+#   JSON body needs it to stay a number. Ansible's templating stringifies any
+#   templated leaf beyond a bare variable — an attribute lookup or a filter is
+#   enough — so `activeProfileId: "{{ x.id | int }}"` becomes the JSON string
+#   "4", not the number 4, and a strict API rejects it outright. The fix,
+#   where it matters (see the Jellyseerr registration tasks): build the whole
+#   body as one Jinja dict literal and serialize it with to_json in the same
+#   expression, which is the only combination that keeps the type.
 # =============================================================================
 
 - name: Deploy the Reelhub stack
-  hosts: local
+  hosts: reelhub
   gather_facts: true
   vars_files:
     - vars.yml
   vars:
-    # Repo root, derived from this file's location (<repo>/ansible/deploy.yml).
-    # Nothing here hardcodes a path under $HOME, so the checkout can live
-    # anywhere and can be renamed or moved without editing any config.
-    project_dir: "{{ playbook_dir | dirname }}"
+    # Where this repo lives on the TARGET server (not your laptop). Defaults
+    # under the SSH user's own home directory so the initial checkout needs no
+    # sudo. Change reelhub_dir if you'd rather it lived somewhere else.
+    reelhub_dir: "{{ ansible_env.HOME }}/reelhub"
+    reelhub_repo_url: https://github.com/pieceowater/reelhub.git
+    reelhub_repo_branch: main
+    project_dir: "{{ reelhub_dir }}"
 
     # Everything below is a plain, non-secret default. vars.yml (gitignored)
     # holds only the two passwords; override any of these here if you need
@@ -130,6 +162,89 @@
       - Knaben
 
   tasks:
+
+    # ---------- 0. Bootstrap: Docker and this repo, on the target ----------
+    #
+    # The only section that needs sudo, and only on a machine that doesn't
+    # already have Docker — every task here is skipped once docker_check
+    # confirms it's present, so a second run against an already-bootstrapped
+    # server touches none of this. Follows Docker's own documented Ubuntu
+    # install steps (docs.docker.com/engine/install/ubuntu/) rather than the
+    # distro's own `docker.io` package, which tends to lag behind upstream.
+    - name: Check whether Docker is already installed
+      ansible.builtin.command: docker --version
+      register: docker_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install Docker's prerequisites
+      ansible.builtin.apt:
+        name: [ca-certificates, curl, git]
+        state: present
+        update_cache: true
+      become: true
+      when: docker_check.rc != 0
+
+    - name: Add Docker's official apt repository
+      ansible.builtin.deb822_repository:
+        name: docker
+        types: deb
+        uris: "https://download.docker.com/linux/ubuntu"
+        suites: "{{ ansible_distribution_release }}"
+        components: stable
+        signed_by: "https://download.docker.com/linux/ubuntu/gpg"
+        state: present
+      become: true
+      when: docker_check.rc != 0
+
+    - name: Install Docker Engine and the Compose plugin
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+      become: true
+      when: docker_check.rc != 0
+
+    - name: Make sure Docker is running and starts on boot
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+      become: true
+      when: docker_check.rc != 0
+
+    # Lets {{ ansible_user }} run `docker compose` without sudo, which every
+    # later task in this playbook assumes. Group membership only takes effect
+    # on a fresh login session — reset_connection forces exactly that, right
+    # here, so the very next task already sees it. Skipping this would mean
+    # every `docker compose` call from here on fails with a permissions error
+    # against the socket, even though the group was "added" correctly.
+    - name: "Add {{ ansible_user }} to the docker group"
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+      become: true
+      register: docker_group
+
+    - name: Start a fresh connection so the new group membership applies
+      ansible.builtin.meta: reset_connection
+      when: docker_group is changed
+
+    # No sudo needed from here: this clones into the user's own home
+    # directory. Re-running just fast-forwards to the latest commit — data/
+    # and config/ live inside this same tree but are gitignored, so they're
+    # untracked as far as git is concerned and this never touches them.
+    - name: Check out this repo on the server
+      ansible.builtin.git:
+        repo: "{{ reelhub_repo_url }}"
+        dest: "{{ project_dir }}"
+        version: "{{ reelhub_repo_branch }}"
 
     # ---------- 1. Directory layout and container startup ----------
 

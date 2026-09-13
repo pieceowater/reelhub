@@ -8,7 +8,12 @@ data/
 # Real settings and passwords. The committed template is ansible/vars.yml.example
 ansible/vars.yml
 
-# Local environment overrides (PUID/PGID/TZ). Template: .env.example
+# Names your actual server (address, SSH user) — specific to your network.
+# The committed template is ansible/inventory.ini.example
+ansible/inventory.ini
+
+# Local environment overrides (PUID/PGID/TZ) — optional, docker-compose.yml
+# already has sane defaults baked in without this file.
 .env
 
 # Ansible scratch

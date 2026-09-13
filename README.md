@@ -5,19 +5,32 @@ downloaded, and put in front of you to watch — no manual searching for files.
 
 ## Setup
 
+Two machines are involved: the one you type these commands on (a laptop is
+fine) just needs Ansible — it never runs Docker itself. The other is the
+actual server that ends up running everything; it needs nothing but Ubuntu
+(or any apt-based Linux), SSH, and a user with sudo.
+
 ```bash
 git clone https://github.com/pieceowater/reelhub.git
 cd reelhub
 
-cp ansible/vars.yml.example ansible/vars.yml   # 1. set your password
+cp ansible/vars.yml.example ansible/vars.yml         # 1. set your password
 $EDITOR ansible/vars.yml
 
-make deploy                                     # 2. bring everything up
+cp ansible/inventory.ini.example ansible/inventory.ini   # 2. point at your server
+$EDITOR ansible/inventory.ini
+
+make deploy ANSIBLE_ARGS="--ask-pass --ask-become-pass"  # 3. bring everything up
 ```
 
-Needs [Docker](https://www.docker.com/products/docker-desktop/) and Ansible
-(`brew install ansible`). Takes a few minutes on the first run, mostly
-downloading images. When it's done, everything below already works.
+`--ask-pass` is your SSH login password; `--ask-become-pass` is the sudo
+password, needed only the first time (to install Docker) — harmless to keep
+passing it after that. Using an SSH key instead of a password? Put it in
+`inventory.ini` (the file has an example line) and drop both flags.
+
+Takes a few minutes on the first run: installing Docker, then pulling images.
+When it's done, everything below already works — `make urls` prints the exact
+addresses for your server.
 
 ## Login
 
@@ -26,15 +39,18 @@ Same username and password everywhere: **`pcwt`** and whatever you set as
 
 | | URL |
 |---|---|
-| Request something to watch | [localhost:5055](http://localhost:5055) (Jellyseerr) |
-| Watch it | [localhost:8096](http://localhost:8096) (Jellyfin) |
-| Add your own private trackers | [localhost:9696](http://localhost:9696) (Prowlarr) |
+| Request something to watch | `http://<server>:5055` (Jellyseerr) |
+| Watch it | `http://<server>:8096` (Jellyfin) |
+| Add your own private trackers | `http://<server>:9696` (Prowlarr) |
+
+Run `make urls` for the real, clickable addresses — `<server>` above is
+whatever you put in `inventory.ini`.
 
 ## Requesting a movie or show
 
-Open [Jellyseerr](http://localhost:5055), sign in, search for the title, click
-**Request**. That's it — this is what to give everyone in the house. Usually
-ready to watch within a few minutes of the download finishing.
+Open Jellyseerr, sign in, search for the title, click **Request**. That's it
+— this is what to give everyone in the house. Usually ready to watch within a
+few minutes of the download finishing.
 
 Nine public sources are already searching, no setup needed. Want a specific
 tracker you have an account on? Prowlarr → **Indexers** → **Add Indexer**.
@@ -44,8 +60,7 @@ available. This is deliberate: a 4K release of an older or less popular title
 can have only a handful of seeders and take days, while a 1080p release of the
 same film often has hundreds — capping it keeps things fast without much of a
 visible quality difference on most screens. Want a specific movie in 4K
-anyway? Add it directly in [Radarr](http://localhost:7878) instead and pick
-the Ultra-HD profile there.
+anyway? Add it directly in Radarr instead and pick the Ultra-HD profile there.
 
 Jellyfin is set to prefer Russian audio and subtitles when a file actually has
 them, falling back to the original with subtitles otherwise — so both options
@@ -61,8 +76,8 @@ alternative that covers the same ground is
 [overseerrTV](https://apps.apple.com/us/app/overseerrtv/id6476953032).)
 
 1. Install it from the App Store on the Apple TV (requires tvOS 26.0+)
-2. Point it at your Jellyseerr server: `http://192.168.x.x:5055` — get the
-   exact address from `make urls`
+2. Point it at your Jellyseerr server: `http://<server>:5055` — get the exact
+   address from `make urls`
 3. Sign in with the same [Login](#login) as everywhere else
 
 From there, searching and requesting inside the app works exactly like the
@@ -70,21 +85,23 @@ From there, searching and requesting inside the app works exactly like the
 just Jellyseerr's own catalog, presented as a native tvOS app instead of a
 web page.
 
-Prefer a different Jellyfin client — Infuse, the Jellyfin app, a browser?
-Any of them works too, pointed at `192.168.x.x:8096` with the same login; you'd
-just keep using Jellyseerr's web page (or JellySee) to request things and that
+Prefer a different Jellyfin client — Infuse, the Jellyfin app, a browser? Any
+of them works too, pointed at `<server>:8096` with the same login; you'd just
+keep using Jellyseerr's web page (or JellySee) to request things and that
 client only for watching.
 
 ## Everyday commands
 
 | | |
 |---|---|
-| `make deploy` | Set everything up (safe to re-run any time) |
+| `make deploy` | Set everything up on the server (safe to re-run any time) |
 | `make up` / `make down` | Start / stop, keeping everything you've configured |
 | `make logs` | See what's happening (`make logs S=radarr` for one service) |
-| `make urls` | Print every URL, including the LAN address other devices need |
+| `make urls` | Print every service's real address |
 
-Run `make` with no arguments to see all of them.
+These (except `deploy`) just SSH to the server and run `docker compose` there
+— no Ansible involved, since that's simpler for something this direct. Run
+`make` with no arguments to see all of them.
 
 Something not working? Expand **Troubleshooting** below.
 
@@ -97,12 +114,15 @@ Something not working? Expand **Troubleshooting** below.
 
 | Service | Port | What it's for |
 |---|---|---|
-| [Jellyseerr](https://github.com/fallenbagel/jellyseerr) | [5055](http://localhost:5055) | The front door. Search for a title, click request. |
-| [Jellyfin](https://jellyfin.org/) | [8096](http://localhost:8096) | The media server you actually watch things on. |
-| [Radarr](https://radarr.video/) | [7878](http://localhost:7878) | Finds, grabs and organises movies. |
-| [Sonarr](https://sonarr.tv/) | [8989](http://localhost:8989) | Same, for TV — tracks seasons and new episodes. |
-| [Prowlarr](https://github.com/Prowlarr/Prowlarr) | [9696](http://localhost:9696) | One place to manage indexers; syncs them to Radarr and Sonarr. |
-| [qBittorrent](https://www.qbittorrent.org/) | [8080](http://localhost:8080) | The torrent client that does the transfer. |
+| [Jellyseerr](https://github.com/fallenbagel/jellyseerr) | 5055 | The front door. Search for a title, click request. |
+| [Jellyfin](https://jellyfin.org/) | 8096 | The media server you actually watch things on. |
+| [Radarr](https://radarr.video/) | 7878 | Finds, grabs and organises movies. |
+| [Sonarr](https://sonarr.tv/) | 8989 | Same, for TV — tracks seasons and new episodes. |
+| [Prowlarr](https://github.com/Prowlarr/Prowlarr) | 9696 | One place to manage indexers; syncs them to Radarr and Sonarr. |
+| [qBittorrent](https://www.qbittorrent.org/) | 8080 | The torrent client that does the transfer. |
+
+All six run on the server named in `ansible/inventory.ini` — `make urls`
+turns this table into real links.
 
 ```
   you ──▶ Jellyseerr ──▶ Radarr / Sonarr ──▶ Prowlarr ──▶ indexers
@@ -121,7 +141,9 @@ Something not working? Expand **Troubleshooting** below.
 Everything shares one directory tree (`data/`), mounted into every container
 at the same path — that's what makes the hand-off free: qBittorrent finishes,
 Radarr moves the file across the same filesystem instead of copying it, and
-Jellyfin sees it right away.
+Jellyfin sees it right away. Both directories live on the server, under this
+repo's own checkout there (see [Layout](#layout)) — nothing is stored on
+whatever machine you run `make deploy` from.
 
 qBittorrent, Radarr, Sonarr and Prowlarr all use the same `pcwt` login as
 Jellyfin. Each only asks for it when reached from *outside* your LAN — inside
@@ -159,9 +181,15 @@ Indexers → Add Indexer, it'll offer to import from Prowlarr) if you want it.
 
 ### How it works
 
-What `make deploy` does, in order:
+`make deploy` runs `ansible/deploy.yml` from your machine against the server
+named in `inventory.ini`. What it does there, in order:
 
-1. Creates the `data/` and `config/` directories the containers use.
+0. **Bootstrap** — installs Docker and the Compose plugin if they're missing
+   (the only part that needs sudo), adds your SSH user to the `docker` group,
+   and checks out this repo on the server itself (default:
+   `~/reelhub` — see `reelhub_dir` in `deploy.yml`'s `vars:` block).
+1. Creates the `data/` and `config/` directories the containers use, inside
+   that checkout.
 2. Starts all six containers.
 3. **qBittorrent** — sets the permanent username/password and download path,
    creates the `movies`/`tv` categories.
@@ -177,59 +205,81 @@ What `make deploy` does, in order:
    matters), finishes its own setup so it's ready on first open.
 
 Re-running `make deploy` is always safe: every step checks what's already
-there and skips it. Steps 6–7 drive Jellyfin/Jellyseerr's internal setup
-screens rather than a documented API, so they're the ones most likely to need
-a manual finish in the browser after a future image update.
+there and skips it — step 0 in particular does nothing at all once Docker is
+installed and the repo is checked out, so `--ask-become-pass` stops being
+necessary after the first run. Steps 6–7 drive Jellyfin/Jellyseerr's internal
+setup screens rather than a documented API, so they're the ones most likely
+to need a manual finish in the browser after a future image update.
+
+Ansible modules run on the target you name in `inventory.ini`, not on the
+machine you type `make deploy` on — that's *why* this works at all: every
+`localhost:PORT` API call throughout `deploy.yml` correctly means the server,
+because the task making that call is itself running there.
 
 ### Layout
 
 ```
 reelhub/
-├── docker-compose.yml      the six services
-├── Makefile                every command you need day to day
+├── docker-compose.yml       the six services
+├── Makefile                 every command you need day to day
 ├── ansible/
-│   ├── deploy.yml          the playbook — defaults, usernames and rationale live here
-│   ├── vars.yml.example    template — copy to vars.yml and set the password
-│   ├── vars.yml            your one real password, nothing else (gitignored)
-│   ├── inventory.ini       localhost, local connection
-│   └── ansible.cfg         so `ansible-playbook deploy.yml` just works
-├── config/                 per-service state, created on first run (gitignored)
-└── data/                   media + downloads, created on first run (gitignored)
+│   ├── deploy.yml           the playbook — defaults, usernames and rationale live here
+│   ├── vars.yml.example     template — copy to vars.yml and set the password
+│   ├── vars.yml             your one real password, nothing else (gitignored)
+│   ├── inventory.ini.example  template — copy to inventory.ini and name your server
+│   ├── inventory.ini        your server's real address (gitignored)
+│   └── ansible.cfg          so `ansible-playbook deploy.yml` just works
+├── config/                  per-service state — lives on the SERVER (gitignored)
+└── data/                    media + downloads — lives on the SERVER (gitignored)
     ├── downloads/
     └── media/{movies,tv}
 ```
 
+This tree exists twice: once here, wherever you cloned it to run `make
+deploy` from, and once more on the server itself, at `~/reelhub` by default —
+Ansible's bootstrap step (see [How it works](#how-it-works)) puts it there.
+`config/` and `data/` only ever populate in the *server's* copy, since that's
+where the containers actually run.
+
 ### Configuration
 
 **`ansible/vars.yml`** — one password (`master_pass`), used for qBittorrent,
-Prowlarr and Jellyfin alike. Copy it from `vars.yml.example` and set it before
-your first `make deploy`. Want a different password for just one of them
-instead? See the comments in `vars.yml.example`.
+Radarr, Sonarr, Prowlarr and Jellyfin alike. Copy it from `vars.yml.example`
+and set it before your first `make deploy`. Want a different password for
+just one of them instead? See the comments in `vars.yml.example`.
+
+**`ansible/inventory.ini`** — your server's address and SSH login. Copy it
+from `inventory.ini.example`; the file itself documents password vs. SSH-key
+auth, and how to point it at `localhost` instead if you ever want to test
+without a separate machine.
 
 **The `vars:` block at the top of `ansible/deploy.yml`** — everything else:
-the shared username, ports, download categories, library paths. None of it is
-a secret, so it lives in the playbook rather than a file you have to remember
-exists. Changing a port also means updating the matching `ports:` line in
+the shared username, ports, download categories, library paths, and where the
+repo gets checked out on the server (`reelhub_dir`). None of it is a secret,
+so it lives in the playbook rather than a file you have to remember exists.
+Changing a port also means updating the matching `ports:` line in
 `docker-compose.yml`.
 
 **`docker-compose.yml`** — the container user and timezone, near the top:
 
 ```yaml
-PUID: ${PUID:-1000}     # `id -u` — match your host user so files aren't root-owned
-PGID: ${PGID:-1000}     # `id -g`
+PUID: ${PUID:-1000}     # `id -u` on the server — match it so files aren't root-owned
+PGID: ${PGID:-1000}     # `id -g` on the server
 TZ: ${TZ:-Asia/Almaty}
 ```
 
-Edit the defaults there, or override for one run (`PUID=$(id -u) make up`). On
-macOS with Docker Desktop you can leave this alone.
+These are read from a `.env` file *on the server*, next to the checked-out
+`docker-compose.yml` — create one there if you want something other than the
+defaults; Ubuntu's first user is almost always UID/GID 1000, so this is
+usually fine to leave alone.
 
-**Keeping `vars.yml` out of git**: it's already gitignored —
-`vars.yml.example` is what gets committed. To keep the real file in the repo
-instead, encrypt it:
+**Keeping `vars.yml`/`inventory.ini` out of git**: both are already
+gitignored — the `.example` files are what get committed. To keep the real
+files in the repo instead, encrypt them:
 
 ```bash
 ansible-vault encrypt ansible/vars.yml
-make deploy ANSIBLE_ARGS=--ask-vault-pass
+make deploy ANSIBLE_ARGS="--ask-pass --ask-become-pass --ask-vault-pass"
 ```
 
 ### Versions
@@ -256,14 +306,25 @@ you know what broke if something does.
 
 ### Troubleshooting
 
+**`ssh: connect to host ... port 22: Connection refused` (or similar).**
+Check `inventory.ini` has the right address, and that the server is actually
+up and reachable — `ping <server>` from the same machine you're running
+`make deploy` from.
+
+**A bootstrap task fails asking for a password, or "Missing sudo password".**
+You need `ANSIBLE_ARGS="--ask-pass --ask-become-pass"` (password auth) the
+first time you deploy to a fresh server, so Ansible can log in and then sudo
+to install Docker. Once Docker is installed this becomes unnecessary, but
+it's harmless to keep passing it.
+
 **Jellyseerr says "username or password incorrect."** Double-check you're
 using `pcwt`, not a different username — see [Login](#login).
 
 **A Jellyfin or Jellyseerr task says `failed (ignored)`.** Shouldn't happen on
 a clean run with the pinned versions — every step there is checked against the
 real app state, not just an HTTP status. If it does, that app's internal setup
-screens likely shifted in an update. Open [Jellyfin](http://localhost:8096) or
-[Jellyseerr](http://localhost:5055) and click through the setup once by hand;
+screens likely shifted in an update. Open Jellyfin or Jellyseerr in a browser
+(`make urls` for the addresses) and click through the setup once by hand;
 everything else is already configured.
 
 **Prowlarr shows an "Authentication Required" modal you can't get past.**
@@ -275,19 +336,21 @@ Radarr/Sonarr integration, which uses an API key, not this login.
 
 **qBittorrent returns 403 "Your IP address has been banned."** It bans a
 client for an hour after a few failed logins — easy to trigger while you're
-getting `vars.yml` right. `docker compose restart qbittorrent` clears it (the
-ban list is only in memory), then `make deploy` again.
+getting `vars.yml` right. `make logs S=qbittorrent` to confirm, then
+`ssh <server> "cd reelhub && docker compose restart qbittorrent"` clears it
+(the ban list is only in memory), then `make deploy` again.
 
 **qBittorrent login fails after you changed the password in `vars.yml`.** The
 container still has the old one. Set it directly in the qBittorrent UI (Tools
-→ Options → Web UI), or `make down && rm -rf config/qbittorrent && make deploy`
-to start that service clean.
+→ Options → Web UI), or `make down`, then on the server
+`rm -rf reelhub/config/qbittorrent`, then `make deploy` to start that service
+clean.
 
 **`Could not read one or more API keys`.** One of the *arr containers didn't
 finish starting. Check `make logs S=radarr`, then re-run `make deploy`.
 
 **Nothing is ever found.** Check [Default indexers](#default-indexers) — if
-you're looking for something all four public ones genuinely don't have, add
+you're looking for something all nine public ones genuinely don't have, add
 your own private tracker the same way.
 
 **A port is already taken.** Change it in the `vars:` block at the top of
