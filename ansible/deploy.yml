@@ -101,6 +101,10 @@
     # registration tasks below for what that looked like in practice.
     jellyseerr_quality_profile: HD-1080p
 
+    # How many points a Russian-audio match is worth in that profile — see the
+    # comment above the Custom Format tasks below for what this does and why.
+    russian_audio_score: 100
+
     # Radarr, Sonarr and Prowlarr's Web UI logins, each set once on the first
     # run that finds authentication still turned off. Ignored after that —
     # changing a password in any of their own UIs later is never overwritten.
@@ -1070,6 +1074,116 @@
       register: sonarr_quality_profiles
       changed_when: false
 
+    # ---------- 8b. Radarr / Sonarr: prefer Russian-audio releases ----------
+    #
+    # Quality profiles only ever compare resolution/source — they have no idea
+    # what language a release is in, so within the same tier (HD-1080p) Radarr
+    # and Sonarr grab whichever release scores highest by quality alone. Since
+    # the big English-language public trackers (YTS, TPB, TorrentDownload) vastly
+    # out-seed the Russian ones added earlier, that's what wins every time even
+    # though RuTor/NoNaMe Club/BigFANGroup releases exist and would work fine.
+    # A Custom Format fixes this: match on release title, add a fixed point
+    # bonus for that match in the profile, and now a Russian release wins the
+    # comparison whenever one exists — with no bonus at all when it doesn't, so
+    # English-only titles are grabbed exactly as before. Not a hard requirement:
+    # an English release still gets grabbed if no Russian one exists, matching
+    # "Russian if available, original with subtitles otherwise."
+    #
+    # This also flips on upgrading: by default a profile stops looking the
+    # moment a movie/episode has ANY accepted file, English included, so
+    # something grabbed before a Russian release existed would stay English
+    # forever. upgradeAllowed + cutoffFormatScore matching the bonus above
+    # tells Radarr/Sonarr to keep searching (on their normal schedule, or
+    # right away if you hit Search yourself) until something scores at least
+    # that high, and to replace the file automatically once it does. It still
+    # has to actually download that release, though — there's no way to
+    # retroactively add a Russian track to a file that doesn't have one.
+    - name: "Radarr / Sonarr: list custom formats"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ item.port }}/api/{{ item.api }}/customformat"
+        headers:
+          X-Api-Key: "{{ item.key }}"
+        status_code: 200
+      register: arr_custom_formats
+      changed_when: false
+      loop: &arr_apps
+        - { name: radarr, port: "{{ radarr_port }}", api: v3, key: "{{ radarr_api_key }}" }
+        - { name: sonarr, port: "{{ sonarr_port }}", api: v3, key: "{{ sonarr_api_key }}" }
+      loop_control:
+        label: "{{ item.name }}"
+
+    # The regex matches the usual markers of a dubbed/multi-audio release
+    # (rus dub, MVO/AVO — the standard Russian voice-over abbreviations, dual
+    # audio) or literal Cyrillic anywhere in the title, which covers RuTor,
+    # NoNaMe Club and BigFANGroup's own title format (e.g. "Матрица / The
+    # Matrix"). Guarded by name so re-running never creates a duplicate.
+    - name: "Radarr / Sonarr: create the Russian Audio custom format"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ item.item.port }}/api/{{ item.item.api }}/customformat"
+        method: POST
+        headers:
+          X-Api-Key: "{{ item.item.key }}"
+        body_format: json
+        body:
+          name: Russian Audio
+          includeCustomFormatWhenRenaming: false
+          specifications:
+            - name: Russian audio indicators
+              implementation: ReleaseTitleSpecification
+              negate: false
+              required: false
+              fields:
+                - { name: value, value: '(?i)(rus\.?dub|dubbed|dual[\s\.\-_]?audio|многоголос|дублир|\bmvo\b|\bavo\b)|[а-яё]' }
+        status_code: [200, 201]
+      loop: "{{ arr_custom_formats.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when: "'Russian Audio' not in (item.json | default([]) | map(attribute='name') | list)"
+
+    # Creating a custom format auto-adds it to every quality profile with a
+    # score of 0 (no effect); this re-fetches HD-1080p specifically to raise
+    # that to a real bonus. Re-runs are harmless — setting the same score
+    # twice changes nothing — so this isn't guarded like a one-shot step.
+    - name: "Radarr / Sonarr: fetch the HD-1080p profile to score it"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ item.port }}/api/{{ item.api }}/qualityprofile"
+        headers:
+          X-Api-Key: "{{ item.key }}"
+        status_code: 200
+      register: arr_profiles_for_scoring
+      changed_when: false
+      loop: *arr_apps
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: "Radarr / Sonarr: give Russian-audio releases a score bonus in HD-1080p"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ item.item.port }}/api/{{ item.item.api }}/qualityprofile/{{ profile.id }}"
+        method: PUT
+        headers:
+          X-Api-Key: "{{ item.item.key }}"
+        body_format: json
+        # Every other formatItem is carried over unchanged; only the "Russian
+        # Audio" one gets its score raised (combine() overlays just the score
+        # key, keeping that item's own format/name as-is). upgradeAllowed and
+        # cutoffFormatScore are what make Radarr/Sonarr keep searching for a
+        # Russian release even after an English one has already been grabbed.
+        body: >-
+          {{ profile | combine({
+               'formatItems': new_format_items,
+               'upgradeAllowed': true,
+               'cutoffFormatScore': russian_audio_score,
+             }) }}
+        status_code: [200, 202]
+      vars:
+        profile: "{{ item.json | selectattr('name', 'equalto', jellyseerr_quality_profile) | first }}"
+        new_format_items: >-
+          {{ (profile.formatItems | rejectattr('name', 'equalto', 'Russian Audio') | list)
+             + [(profile.formatItems | selectattr('name', 'equalto', 'Russian Audio') | first) | combine({'score': russian_audio_score})] }}
+      loop: "{{ arr_profiles_for_scoring.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
     - name: "Jellyseerr: list existing Radarr servers"
       ansible.builtin.uri:
         url: "http://localhost:{{ jellyseerr_port }}/api/v1/settings/radarr"
@@ -1081,29 +1195,44 @@
       changed_when: false
       ignore_errors: true
 
+    # body_format: raw + a Jinja dict literal + to_json, not a plain YAML body:
+    # mapping — Ansible's (non-native) Jinja rendering stringifies ANY
+    # templated leaf in a YAML structure the moment it's more than a bare
+    # variable (an attribute lookup or a filter is enough), so
+    # `activeProfileId: "{{ ....id }}"` always ends up as the JSON string "4"
+    # rather than the number 4, no matter how many ways you filter/cast it —
+    # confirmed by testing `"{{ 4 | int }}"` alone, with nothing else in the
+    # expression, which fails exactly the same way. Jellyseerr's schema
+    # validator rejects that outright with "should be number". Building the
+    # whole dict inside one {{ }} expression keeps every value's real type
+    # until to_json serializes the lot in a single pass, which is the only
+    # combination that actually round-trips a real integer through Ansible.
     - name: "Jellyseerr: register Radarr as the movie backend"
       ansible.builtin.uri:
         url: "http://localhost:{{ jellyseerr_port }}/api/v1/settings/radarr"
         method: POST
         headers:
           Cookie: "{{ jsr_cookie }}"
-        body_format: json
-        body:
-          name: Radarr
-          hostname: radarr
-          port: "{{ radarr_port }}"
-          apiKey: "{{ radarr_api_key }}"
-          useSsl: false
-          baseUrl: ""
-          activeProfileId: "{{ (radarr_quality_profiles.json | selectattr('name', 'equalto', jellyseerr_quality_profile) | first).id }}"
-          activeProfileName: "{{ jellyseerr_quality_profile }}"
-          activeDirectory: "{{ radarr_root }}"
-          is4k: false
-          minimumAvailability: released
-          isDefault: true
-          externalUrl: ""
-          syncEnabled: true
-          preventSearch: false
+          Content-Type: application/json
+        body_format: raw
+        body: >-
+          {{ {
+               'name': 'Radarr',
+               'hostname': 'radarr',
+               'port': radarr_port,
+               'apiKey': radarr_api_key,
+               'useSsl': false,
+               'baseUrl': '',
+               'activeProfileId': (radarr_quality_profiles.json | selectattr('name', 'equalto', jellyseerr_quality_profile) | first).id,
+               'activeProfileName': jellyseerr_quality_profile,
+               'activeDirectory': radarr_root,
+               'is4k': false,
+               'minimumAvailability': 'released',
+               'isDefault': true,
+               'externalUrl': '',
+               'syncEnabled': true,
+               'preventSearch': false,
+             } | to_json }}
         status_code: [200, 201]
       when:
         - jsr_cookie is defined
@@ -1126,30 +1255,36 @@
     # 400 "should have required property" without it) — it is Sonarr's own
     # "organize episodes into season folders" setting, not something Jellyseerr
     # invented, so true matches how Sonarr lays out {{ sonarr_root }} above.
+    # See the comment on the Radarr registration task above for why this is a
+    # Jinja dict literal + to_json rather than a plain YAML body: mapping —
+    # activeProfileId (and activeLanguageProfileId) have to be real numbers.
     - name: "Jellyseerr: register Sonarr as the TV backend"
       ansible.builtin.uri:
         url: "http://localhost:{{ jellyseerr_port }}/api/v1/settings/sonarr"
         method: POST
         headers:
           Cookie: "{{ jsr_cookie }}"
-        body_format: json
-        body:
-          name: Sonarr
-          hostname: sonarr
-          port: "{{ sonarr_port }}"
-          apiKey: "{{ sonarr_api_key }}"
-          useSsl: false
-          baseUrl: ""
-          activeProfileId: "{{ (sonarr_quality_profiles.json | selectattr('name', 'equalto', jellyseerr_quality_profile) | first).id }}"
-          activeProfileName: "{{ jellyseerr_quality_profile }}"
-          activeDirectory: "{{ sonarr_root }}"
-          activeLanguageProfileId: 1
-          is4k: false
-          isDefault: true
-          externalUrl: ""
-          syncEnabled: true
-          preventSearch: false
-          enableSeasonFolders: true
+          Content-Type: application/json
+        body_format: raw
+        body: >-
+          {{ {
+               'name': 'Sonarr',
+               'hostname': 'sonarr',
+               'port': sonarr_port,
+               'apiKey': sonarr_api_key,
+               'useSsl': false,
+               'baseUrl': '',
+               'activeProfileId': (sonarr_quality_profiles.json | selectattr('name', 'equalto', jellyseerr_quality_profile) | first).id,
+               'activeProfileName': jellyseerr_quality_profile,
+               'activeDirectory': sonarr_root,
+               'activeLanguageProfileId': 1,
+               'is4k': false,
+               'isDefault': true,
+               'externalUrl': '',
+               'syncEnabled': true,
+               'preventSearch': false,
+               'enableSeasonFolders': true,
+             } | to_json }}
         status_code: [200, 201]
       when:
         - jsr_cookie is defined

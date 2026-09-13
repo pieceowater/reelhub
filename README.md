@@ -52,17 +52,28 @@ them, falling back to the original with subtitles otherwise — so both options
 are there whenever the download provides them (a plain single-language rip
 still just plays in whatever language it was released in).
 
-## Watching on a TV with Infuse
+## Requesting and watching on Apple TV
 
-1. Run `make urls` — the last line gives you an address like `192.168.x.x:8096`
-2. In Infuse: **Add Files** → **Add Share** → **Protocol: Jellyfin**
-3. **Address**: the `192.168.x.x` from step 1 (not `localhost` — that only
-   means "this same device")
-4. **Username** / **Password**: same as [Login](#login) above
-5. **Add**
+[JellySee](https://apps.apple.com/us/app/jellysee/id6748783768) is a paid tvOS
+app that does the whole loop from the couch: search, request, and play, all in
+one place — no need to open Jellyseerr in a browser at all. (A free
+alternative that covers the same ground is
+[overseerrTV](https://apps.apple.com/us/app/overseerrtv/id6476953032).)
 
-Same login works in the Jellyfin app, a browser, or any other Jellyfin client
-— as long as the device is on the same Wi-Fi/network.
+1. Install it from the App Store on the Apple TV (requires tvOS 26.0+)
+2. Point it at your Jellyseerr server: `http://192.168.x.x:5055` — get the
+   exact address from `make urls`
+3. Sign in with the same [Login](#login) as everywhere else
+
+From there, searching and requesting inside the app works exactly like the
+[Requesting a movie or show](#requesting-a-movie-or-show) section above — it's
+just Jellyseerr's own catalog, presented as a native tvOS app instead of a
+web page.
+
+Prefer a different Jellyfin client — Infuse, the Jellyfin app, a browser?
+Any of them works too, pointed at `192.168.x.x:8096` with the same login; you'd
+just keep using Jellyseerr's web page (or JellySee) to request things and that
+client only for watching.
 
 ## Everyday commands
 
@@ -71,7 +82,7 @@ Same login works in the Jellyfin app, a browser, or any other Jellyfin client
 | `make deploy` | Set everything up (safe to re-run any time) |
 | `make up` / `make down` | Start / stop, keeping everything you've configured |
 | `make logs` | See what's happening (`make logs S=radarr` for one service) |
-| `make urls` | Print every URL, including the one for Infuse |
+| `make urls` | Print every URL, including the LAN address other devices need |
 
 Run `make` with no arguments to see all of them.
 
