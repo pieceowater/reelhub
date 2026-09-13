@@ -19,3 +19,12 @@ jellyfin_admin_pass: "{{ master_pass }}"
 radarr_admin_pass: "{{ master_pass }}"
 sonarr_admin_pass: "{{ master_pass }}"
 prowlarr_admin_pass: "{{ master_pass }}"
+
+# The nightly config/ backup's encryption key (see ansible/deploy.yml,
+# "Backups" section). Deliberately its own value, NOT "{{ master_pass }}":
+# restic bakes this in permanently the first time it initializes the backup
+# repo, so if you ever rotate master_pass, a value that followed it here
+# would break every backup after that silently. Set it once, then leave it —
+# and keep a copy somewhere else, because a lost restic password makes every
+# existing backup permanently unreadable, with no recovery.
+restic_pass: "CHANGE_ME_before_first_deploy_and_never_again"

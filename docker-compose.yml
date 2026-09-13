@@ -1,4 +1,4 @@
-# Reelhub — the six services. See README.md for what each one does.
+# Reelhub — the nine services. See README.md for what each one does.
 #
 # Two conventions hold this together:
 #
@@ -45,6 +45,21 @@ services:
       - "8080:8080"
       - "6881:6881"
       - "6881:6881/udp"
+    restart: unless-stopped
+    networks:
+      - media
+
+  # Solves the Cloudflare JS challenge that sits in front of some indexers
+  # (1337x, EZTV, the KickassTorrents mirrors — see README, these were left
+  # out of the default indexer list until now for exactly this reason).
+  # Prowlarr calls it directly; nothing else in the stack talks to it.
+  flaresolverr:
+    image: flaresolverr/flaresolverr:v3.5.2
+    container_name: flaresolverr
+    environment:
+      TZ: ${TZ:-Asia/Almaty}
+    ports:
+      - "8191:8191"
     restart: unless-stopped
     networks:
       - media
@@ -108,6 +123,14 @@ services:
     volumes:
       - ./config/jellyfin:/config
       - ./data/media:/data/media
+    # Intel Quick Sync (VAAPI) hardware transcoding — the deploy playbook
+    # turns this on in Jellyfin's own settings once this device exists.
+    # Requires the server to actually have /dev/dri (an Intel iGPU): Docker
+    # refuses to start the container at all if this path doesn't exist on the
+    # host, so remove this `devices:` block if you ever move the stack to a
+    # server without one.
+    devices:
+      - /dev/dri:/dev/dri
     ports:
       - "8096:8096"
     restart: unless-stopped
@@ -125,6 +148,41 @@ services:
       - ./config/jellyseerr:/app/config
     ports:
       - "5055:5055"
+    restart: unless-stopped
+    networks:
+      - media
+
+  # Subtitles for Radarr/Sonarr's library — watches the same data/media tree
+  # Jellyfin reads and fetches matching Russian/English subs next to each
+  # video file.
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:1.6.0
+    container_name: bazarr
+    environment:
+      <<: *common-env
+    volumes:
+      - ./config/bazarr:/config
+      - ./data/media:/data/media
+    ports:
+      - "6767:6767"
+    restart: unless-stopped
+    networks:
+      - media
+
+  # Syncs Radarr/Sonarr's HD-1080p quality profile against TRaSH-Guides'
+  # curated custom formats (junk-release filtering, release-group cleanup) on
+  # CRON_SCHEDULE. Deliberately never touches the hand-made "Russian Audio"
+  # custom format's score — see ansible/deploy.yml and config/recyclarr's
+  # recyclarr.yml, which the playbook generates, for why that's safe.
+  recyclarr:
+    image: ghcr.io/recyclarr/recyclarr:8.7.2
+    container_name: recyclarr
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      TZ: ${TZ:-Asia/Almaty}
+      CRON_SCHEDULE: "@daily"
+    volumes:
+      - ./config/recyclarr:/config
     restart: unless-stopped
     networks:
       - media
