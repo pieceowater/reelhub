@@ -181,6 +181,11 @@ services:
     environment:
       TZ: ${TZ:-Asia/Almaty}
       CRON_SCHEDULE: "@daily"
+      # `docker compose up -d` starts this before deploy.yml has generated
+      # the real recyclarr.yml (it needs Radarr/Sonarr's API keys, which
+      # aren't known until later in the playbook) — without this, recyclarr
+      # errors out and restart-loops in that gap instead of just waiting.
+      RECYCLARR_CREATE_CONFIG: "true"
     volumes:
       - ./config/recyclarr:/config
     restart: unless-stopped

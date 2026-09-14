@@ -272,6 +272,8 @@
         - config/prowlarr
         - config/jellyfin
         - config/jellyseerr
+        - config/bazarr
+        - config/recyclarr
 
     - name: Start the stack (docker compose up -d)
       ansible.builtin.command:
@@ -1539,6 +1541,45 @@
           (hostnames `radarr` and `sonarr`, the API keys are in
           config/*/config.xml).
       when: jsr_cookie is not defined
+
+    # ---------- 8c. Recyclarr: sync TRaSH-Guides quality profiles ----------
+    #
+    # Placed after the Russian Audio custom format above on purpose:
+    # recyclarr.yml's reset_unmatched_scores.except list names it by title,
+    # so it has to already exist for that exclusion to mean anything — not
+    # that it would error either way, but the ordering is what makes the
+    # comment in the template ("never touches Russian Audio") actually true
+    # from the very first sync instead of the second one.
+    #
+    # recyclarr itself only runs once and exits; RECYCLARR_CREATE_CONFIG on
+    # the container (docker-compose.yml) is what stops it from erroring in
+    # the gap between the stack starting (section 1, above) and this
+    # template existing. Re-templating on every run and re-running sync here
+    # means a `git pull` that changes the trash_id list above (or a TRaSH
+    # Guide update upstream) takes effect on the next `make deploy`, not on
+    # whatever CRON_SCHEDULE happens to fire next.
+    - name: "Recyclarr: write recyclarr.yml"
+      ansible.builtin.template:
+        src: recyclarr.yml.j2
+        dest: "{{ project_dir }}/config/recyclarr/recyclarr.yml"
+        mode: "0600"
+
+    - name: "Recyclarr: sync now"
+      ansible.builtin.command:
+        cmd: docker compose exec -T recyclarr recyclarr sync
+        chdir: "{{ project_dir }}"
+      register: recyclarr_sync
+      changed_when: "'Sync Complete' in recyclarr_sync.stdout"
+      ignore_errors: true
+
+    - name: "Recyclarr: note if the sync failed"
+      ansible.builtin.debug:
+        msg: >-
+          Recyclarr sync failed — check `make logs S=recyclarr` and
+          config/recyclarr/recyclarr.yml on the server. Radarr/Sonarr are
+          unaffected either way; this only adds extra quality-profile
+          scoring on top of what deploy.yml already configured.
+      when: recyclarr_sync is failed
 
     # ---------- 9. Backups: config/ only, restic, local repo on the server ----------
     #
