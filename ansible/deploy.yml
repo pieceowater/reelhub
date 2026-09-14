@@ -1491,21 +1491,32 @@
         # factory WEB-xxx groups use 1000-1003) on both apps.
         merge_group_name: "1080p (language beats quality)"
         merge_group_id: 1080
-        already_merged: "{{ merge_group_name in (profile.items | rejectattr('quality', 'defined') | map(attribute='name') | list) }}"
+        # profile['items'] via bracket subscript, not profile.items: every
+        # dict has a real, callable .items() method built into Python, so
+        # Jinja's dot-attribute access resolves .items to that bound method
+        # instead of the "items" key — silently, with no type error until
+        # something downstream tries to iterate it ("'builtin_function_or_
+        # method' object is not iterable"). Confirmed live: this exact
+        # mistake is what failed the first version of this task. Bracket
+        # notation is the only way to safely reach a dict key literally
+        # named "items" in Jinja; the same applies to the nested group
+        # objects below, which is why leaves_from_groups uses a list
+        # comprehension with ['items'] rather than map(attribute='items').
+        already_merged: "{{ merge_group_name in ((profile['items'] | rejectattr('quality', 'defined') | list) | map(attribute='name') | list) }}"
         # Matched by quality *name*, not id: Radarr calls its remux tier
         # "Remux-1080p", Sonarr calls the same tier "Bluray-1080p Remux" —
         # listing both names here is what makes one task work for both apps.
         merge_names: ["WEBDL-1080p", "WEBRip-1080p", "Bluray-1080p", "Remux-1080p", "Bluray-1080p Remux"]
-        leaf_items: "{{ profile.items | selectattr('quality', 'defined') | list }}"
-        group_items: "{{ profile.items | rejectattr('quality', 'defined') | list }}"
-        leaves_from_groups: "{{ (group_items | map(attribute='items') | list) | sum(start=[]) }}"
+        leaf_items: "{{ profile['items'] | selectattr('quality', 'defined') | list }}"
+        group_items: "{{ profile['items'] | rejectattr('quality', 'defined') | list }}"
+        leaves_from_groups: "{{ [g['items'] for g in group_items] | sum(start=[]) }}"
         all_leaves: "{{ leaf_items + leaves_from_groups }}"
         merged_leaves: "{{ all_leaves | selectattr('quality.name', 'in', merge_names) | map('combine', {'allowed': true}) | list }}"
         kept_top_leaves: "{{ leaf_items | rejectattr('quality.name', 'in', merge_names) | list }}"
         kept_groups: "{{ group_items | rejectattr('name', 'equalto', 'WEB 1080p') | list }}"
         new_quality_group: "{{ {'id': merge_group_id, 'name': merge_group_name, 'allowed': true, 'items': merged_leaves} }}"
-        new_items: "{{ profile.items if already_merged else (kept_top_leaves + kept_groups + [new_quality_group]) }}"
-        new_cutoff: "{{ profile.cutoff if already_merged else merge_group_id }}"
+        new_items: "{{ profile['items'] if already_merged else (kept_top_leaves + kept_groups + [new_quality_group]) }}"
+        new_cutoff: "{{ profile['cutoff'] if already_merged else merge_group_id }}"
       loop: "{{ arr_profiles_for_scoring.results }}"
       loop_control:
         label: "{{ item.item.name }}"
