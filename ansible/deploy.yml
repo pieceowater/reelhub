@@ -1585,7 +1585,7 @@
         cmd: docker compose exec -T recyclarr recyclarr sync
         chdir: "{{ project_dir }}"
       register: recyclarr_sync
-      changed_when: "'Sync Complete' in recyclarr_sync.stdout"
+      changed_when: "'contain quality changes' in recyclarr_sync.stdout or 'contain updated scores' in recyclarr_sync.stdout"
       ignore_errors: true
 
     - name: "Recyclarr: note if the sync failed"
