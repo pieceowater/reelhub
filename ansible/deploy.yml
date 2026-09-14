@@ -897,6 +897,49 @@
         status_code: 201
       ignore_errors: true
 
+    # ---------- 6c. Prowlarr: register FlareSolverr ----------
+    #
+    # FlareSolverr solves the Cloudflare JS challenge that sits in front of
+    # some indexers (1337x, EZTV, the KickassTorrents mirrors — see the
+    # comment on "Prowlarr: add public indexers" above for why those were
+    # left out until now). Registering it here is what actually lets Prowlarr
+    # use it; the indexer list above still only adds trackers that don't need
+    # it, on purpose, since verifying which Cloudflare-gated ones are
+    # actually worth adding is its own separate pass.
+    #
+    # implementation/configContract/field names are Prowlarr's own — read
+    # from its source (IndexerProxies/FlareSolverr/FlareSolverrSettings.cs),
+    # not guessed.
+    - name: "Prowlarr: list existing indexer proxies"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ prowlarr_port }}/api/v1/indexerproxy"
+        headers:
+          X-Api-Key: "{{ prowlarr_api_key }}"
+        status_code: 200
+      register: prowlarr_proxies
+      changed_when: false
+      tags: [flaresolverr]
+
+    - name: "Prowlarr: register FlareSolverr as an indexer proxy"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ prowlarr_port }}/api/v1/indexerproxy"
+        method: POST
+        headers:
+          X-Api-Key: "{{ prowlarr_api_key }}"
+        body_format: json
+        body:
+          name: FlareSolverr
+          implementation: FlareSolverr
+          implementationName: FlareSolverr
+          configContract: FlareSolverrSettings
+          fields:
+            - { name: host, value: "http://flaresolverr:8191/" }
+            - { name: requestTimeout, value: 60 }
+          tags: []
+        status_code: [200, 201]
+      when: "'FlareSolverr' not in (prowlarr_proxies.json | map(attribute='name') | list)"
+      tags: [flaresolverr]
+
     # ---------- 7. Jellyfin: headless first-boot wizard ----------
     #
     # The /Startup/* endpoints are internal and have changed between Jellyfin
