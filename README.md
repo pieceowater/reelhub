@@ -115,7 +115,7 @@ Something not working? Expand **Troubleshooting** below.
 
 | Service | Port | What it's for |
 |---|---|---|
-| [Jellyseerr](https://github.com/fallenbagel/jellyseerr) | 5055 | The front door. Search for a title, click request. |
+| [Jellyseerr](https://github.com/seerr-team/seerr) | 5055 | The front door. Search for a title, click request. |
 | [Jellyfin](https://jellyfin.org/) | 8096 | The media server you actually watch things on. |
 | [Radarr](https://radarr.video/) | 7878 | Finds, grabs and organises movies. |
 | [Sonarr](https://sonarr.tv/) | 8989 | Same, for TV — tracks seasons and new episodes. |
@@ -294,13 +294,16 @@ Every image is pinned to an exact tag rather than `:latest`:
 | Radarr | `6.3.0` |
 | Sonarr | `4.0.19` |
 | Jellyfin | `10.11.11` |
-| Jellyseerr | `2.7.3` |
+| Jellyseerr (now `seerr/seerr`) | `v3.4.1` |
 
 This is why the stack keeps working without attention: an unrelated
 `docker compose pull` on `:latest` can silently swap in a new major release
 and break how the services talk to each other — Jellyfin 12, for instance,
-removed the header Jellyseerr signs in with, so Jellyseerr can't authenticate
-at all on that version. Jellyfin stays on 10.x until Jellyseerr supports 12.
+removed the header the old `fallenbagel/jellyseerr` signed in with, so it
+couldn't authenticate at all on that version. Jellyfin stays on 10.x for now;
+worth re-checking once `seerr/seerr` (the actively maintained successor,
+switched to above) is confirmed to handle Jellyfin 12's auth — not verified
+either way yet.
 
 To move a service up, change its tag and run `make pull` — one at a time, so
 you know what broke if something does.

@@ -139,9 +139,19 @@ services:
 
   # Request front-end. Talks only to the other services' APIs, so it needs no
   # media mounts at all.
+  #
+  # Image is `seerr/seerr`, not `fallenbagel/jellyseerr`: Jellyseerr and
+  # Overseerr merged into one project ("Seerr") and the old image stopped
+  # getting updates. Migration is automatic (same config volume, no manual
+  # DB steps) — confirmed against docs.seerr.dev/migration-guide/ — the only
+  # two things that actually changed are `init: true` here (the new image is
+  # a Node process that needs it for clean signal handling) and the
+  # config/jellyseerr ownership on the server, since this image runs as a
+  # non-root user (uid 1000) where the old one ran as root.
   jellyseerr:
-    image: fallenbagel/jellyseerr:2.7.3
+    image: seerr/seerr:v3.4.1
     container_name: jellyseerr
+    init: true
     environment:
       TZ: ${TZ:-Asia/Almaty}
     volumes:
