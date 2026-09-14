@@ -476,6 +476,22 @@
           web_ui_username: "{{ qbt_new_user }}"
           web_ui_password: "{{ qbt_new_pass }}"
           save_path: "{{ qbt_download_path }}"
+          # Peer-discovery tuning: this ISP puts us behind CGNAT (confirmed —
+          # the router's own WAN IP is itself in RFC1918 space), so the
+          # inbound peer port can never be reachable from outside no matter
+          # how port-forwarding is configured on the home router. DHT/PEX/LSD
+          # find peers through channels that don't depend on us accepting
+          # inbound connections, and raising the connection ceiling means we
+          # actually use more of whatever reachable peers we do find — this
+          # doesn't fix the missing inbound port, it just uses everything
+          # that's still available around it.
+          dht: true
+          pex: true
+          lsd: true
+          max_connec: 500
+          max_connec_per_torrent: 150
+          max_uploads: 20
+          max_uploads_per_torrent: 6
       when: qbt_cookie is defined
 
     # Verify the change actually took — see the to_json note above for why this
