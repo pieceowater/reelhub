@@ -1134,6 +1134,64 @@
         - "'TV Shows' not in (jf_libs.json | default([]) | map(attribute='Name') | list)"
       ignore_errors: true
 
+    # Intel Quick Sync (VAAPI) hardware transcoding — only runs if /dev/dri
+    # actually exists in the container (see the `devices:` comment on
+    # jellyfin in docker-compose.yml). Verified live against this exact
+    # server's Jellyfin 10.11.11 before being written here.
+    #
+    # POST replaces the whole EncodingOptions object rather than merging —
+    # confirmed straight from Jellyfin's ConfigurationController source, not
+    # assumed — so this GETs the current config first and POSTs the full
+    # object back with only these fields changed; skipping the GET would
+    # silently reset every other encoding setting (CRF, muxing queue size,
+    # etc.) to their factory defaults.
+    - name: "Jellyfin: check for a hardware transcode device"
+      ansible.builtin.stat:
+        path: /dev/dri
+      register: jf_dri_device
+
+    - name: "Jellyfin: fetch the current encoding configuration"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyfin_port }}/System/Configuration/encoding"
+        headers:
+          Authorization: 'MediaBrowser Token="{{ jf_token }}"'
+        status_code: 200
+      register: jf_encoding
+      when: jf_token is defined and jf_dri_device.stat.exists
+      changed_when: false
+      ignore_errors: true
+
+    # AllowAv1Encoding is deliberately left at whatever it already was:
+    # nothing here asserts this hardware supports AV1, so this doesn't turn
+    # it on, but it also doesn't turn off a value you set by hand later.
+    # EnableDecodingColorDepth10Hevc: false is the one non-obvious flip — an
+    # Intel iGPU without 10-bit HEVC decode (Skylake and earlier) will try
+    # and fail on 10-bit HEVC sources if this stays at Jellyfin's own
+    # default of true, rather than falling back to software decode cleanly.
+    - name: "Jellyfin: turn on Intel Quick Sync (VAAPI) hardware transcoding"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyfin_port }}/System/Configuration/encoding"
+        method: POST
+        headers:
+          Authorization: 'MediaBrowser Token="{{ jf_token }}"'
+        body_format: json
+        body: >-
+          {{ jf_encoding.json | combine({
+               'HardwareAccelerationType': 'vaapi',
+               'VaapiDevice': '/dev/dri/renderD128',
+               'EnableHardwareEncoding': true,
+               'HardwareDecodingCodecs': (jf_encoding.json.HardwareDecodingCodecs | default([]) | union(['hevc'])),
+               'AllowHevcEncoding': true,
+               'EnableDecodingColorDepth10Hevc': false,
+             }) }}
+        status_code: [200, 204]
+      when:
+        - jf_token is defined
+        - jf_dri_device.stat.exists
+        - jf_encoding is succeeded
+        - jf_encoding.json.HardwareAccelerationType | default('none') != 'vaapi'
+      ignore_errors: true
+
     # ---------- 8. Jellyseerr: link Jellyfin / Radarr / Sonarr ----------
     #
     # Jellyseerr's setup API is session-based, not key-based: /api/v1/auth/jellyfin
