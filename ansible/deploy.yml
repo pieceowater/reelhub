@@ -1352,11 +1352,29 @@
       loop_control:
         label: "{{ item.name }}"
 
-    # The regex matches the usual markers of a dubbed/multi-audio release
-    # (rus dub, MVO/AVO — the standard Russian voice-over abbreviations, dual
-    # audio) or literal Cyrillic anywhere in the title, which covers RuTor,
-    # NoNaMe Club and BigFANGroup's own title format (e.g. "Матрица / The
-    # Matrix"). Guarded by name so re-running never creates a duplicate.
+    # The regex matches the usual markers of a dubbed/multi-audio release:
+    # rus dub, dubbed, dual audio, or MVO/AVO/DVO — the standard abbreviations
+    # for the three common Russian voice-over styles (multi-voice, author's,
+    # dual-voice), in either script.
+    #
+    # The `[а-яёА-ЯЁ]` (bare Cyrillic) branch is close to dead weight in
+    # practice, confirmed live against this exact Radarr build (6.3.0): its
+    # ReleaseTitleSpecification straightforwardly never matches on Cyrillic
+    # text, literal or ranged, byte-identical stored value or not — verified
+    # by testing the regex value directly against real RuTor/NoNaMe
+    # Club/BigFANGroup search results for a real movie (customFormatScore
+    # stayed 0 with a bare Cyrillic literal that was a byte-for-byte
+    # substring of the release title, while a plain ASCII substring of the
+    # same title scored normally). Left in in case a future Radarr version
+    # fixes it — it can't cause a false match, only a missed one — but don't
+    # rely on it: the *only* branch doing real work today is the MVO/AVO/DVO/
+    # dual-audio keyword alternation, which only fires on releases that
+    # actually spell one of those out. A release titled just "Матрица / The
+    # Matrix (1999) BDRip" with no such tag scores 0 here despite obviously
+    # being a Russian release — Bazarr (subtitles) is the fallback for
+    # exactly that gap, not this custom format.
+    #
+    # Guarded by name so re-running never creates a duplicate.
     - name: "Radarr / Sonarr: create the Russian Audio custom format"
       ansible.builtin.uri:
         url: "http://localhost:{{ item.item.port }}/api/{{ item.item.api }}/customformat"
@@ -1373,7 +1391,7 @@
               negate: false
               required: false
               fields:
-                - { name: value, value: '(?i)(rus\.?dub|dubbed|dual[\s\.\-_]?audio|многоголос|дублир|\bmvo\b|\bavo\b)|[а-яё]' }
+                - { name: value, value: '(?i)(rus\.?[\s\.\-_]?dub|dubbed|dual[\s\.\-_]?audio|многоголос|дублир|\bmvo\b|\bavo\b|\bdvo\b)|[а-яёА-ЯЁ]' }
         status_code: [200, 201]
       loop: "{{ arr_custom_formats.results }}"
       loop_control:
