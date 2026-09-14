@@ -2,6 +2,12 @@
 # (ansible/templates/recyclarr.yml.j2) instead of config/recyclarr/recyclarr.yml
 # directly, it's overwritten on every `make deploy`.
 #
+# Instance names (reelhub_radarr / reelhub_sonarr) must be unique across the
+# WHOLE file, not just within their own radarr:/sonarr: block — reusing the
+# same name in both, e.g. plain "reelhub", makes Recyclarr log "Duplicate
+# instances" and silently sync nothing at all, no error, exit code 0. Found
+# by actually running this against the real containers, not from the docs.
+#
 # trash_id values are straight from recyclarr's own config-templates repo
 # (github.com/recyclarr/config-templates), not guessed:
 #   radarr/templates/hd-bluray-web.yml, sonarr/templates/web-1080p.yml
@@ -14,7 +20,7 @@
 # `reset_unmatched_scores: enabled: true` would zero that score out on every
 # sync, since Recyclarr has no idea it exists.
 radarr:
-  reelhub:
+  reelhub_radarr:
     base_url: http://radarr:{{ radarr_port }}
     api_key: {{ radarr_api_key }}
 
@@ -32,7 +38,7 @@ radarr:
         - trash_id: a3ac6af01d78e4f21fcb75f601ac96df  # [Unwanted] Unwanted Formats
 
 sonarr:
-  reelhub:
+  reelhub_sonarr:
     base_url: http://sonarr:{{ sonarr_port }}
     api_key: {{ sonarr_api_key }}
 
