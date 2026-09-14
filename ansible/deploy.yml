@@ -1498,10 +1498,9 @@
         # something downstream tries to iterate it ("'builtin_function_or_
         # method' object is not iterable"). Confirmed live: this exact
         # mistake is what failed the first version of this task. Bracket
-        # notation is the only way to safely reach a dict key literally
-        # named "items" in Jinja; the same applies to the nested group
-        # objects below, which is why leaves_from_groups uses a list
-        # comprehension with ['items'] rather than map(attribute='items').
+        # notation is the fix wherever this file uses dot access on the
+        # profile directly; see the comment on leaves_from_groups below for
+        # why the nested group objects use a different fix.
         already_merged: "{{ merge_group_name in ((profile['items'] | rejectattr('quality', 'defined') | list) | map(attribute='name') | list) }}"
         # Matched by quality *name*, not id: Radarr calls its remux tier
         # "Remux-1080p", Sonarr calls the same tier "Bluray-1080p Remux" —
@@ -1509,7 +1508,15 @@
         merge_names: ["WEBDL-1080p", "WEBRip-1080p", "Bluray-1080p", "Remux-1080p", "Bluray-1080p Remux"]
         leaf_items: "{{ profile['items'] | selectattr('quality', 'defined') | list }}"
         group_items: "{{ profile['items'] | rejectattr('quality', 'defined') | list }}"
-        leaves_from_groups: "{{ [g['items'] for g in group_items] | sum(start=[]) }}"
+        # map(attribute='items'), not a `g.items`/`g['items']` comprehension:
+        # confirmed live that map's attribute lookup does NOT hit the same
+        # dict.items()-collision as dot notation (it must resolve
+        # differently under the hood), and that Ansible's Jinja rejects
+        # one-line `[x for x in y]` comprehension syntax outright anyway
+        # ("expected token ',', got 'for'") even though it's valid Jinja2
+        # elsewhere. Both found by testing in isolation before trusting
+        # either.
+        leaves_from_groups: "{{ (group_items | map(attribute='items') | list) | sum(start=[]) }}"
         all_leaves: "{{ leaf_items + leaves_from_groups }}"
         merged_leaves: "{{ all_leaves | selectattr('quality.name', 'in', merge_names) | map('combine', {'allowed': true}) | list }}"
         kept_top_leaves: "{{ leaf_items | rejectattr('quality.name', 'in', merge_names) | list }}"
