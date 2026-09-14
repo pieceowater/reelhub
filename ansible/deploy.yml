@@ -141,7 +141,16 @@
 
     # How many points a Russian-audio match is worth in that profile — see the
     # comment above the Custom Format tasks below for what this does and why.
-    russian_audio_score: 100
+    # High on purpose (not just "a bit more than nothing"): this needs to
+    # outrank whatever other custom formats an English release might also
+    # pick up, so Russian wins decisively within a quality tier rather than
+    # by a margin some other score bump could erase.
+    russian_audio_score: 1000
+
+    # See the comment above "Radarr / Sonarr: create the Russian Audio
+    # custom format" for what each branch does and which parts are
+    # confirmed working vs. dead weight on which app.
+    russian_audio_regex: '(?i)(rus\.?[\s\.\-_]?dub(bed)?|многоголос|дублир|\bmvo\b|\bavo\b|\bdvo\b)|[а-яёА-ЯЁ]'
 
     # Radarr, Sonarr and Prowlarr's Web UI logins, each set once on the first
     # run that finds authentication still turned off. Ignored after that —
@@ -1352,29 +1361,36 @@
       loop_control:
         label: "{{ item.name }}"
 
-    # The regex matches the usual markers of a dubbed/multi-audio release:
-    # rus dub, dubbed, dual audio, or MVO/AVO/DVO — the standard abbreviations
-    # for the three common Russian voice-over styles (multi-voice, author's,
-    # dual-voice), in either script.
+    # The regex matches the usual markers of a dubbed/multi-audio Russian
+    # release: rus dub(bed), MVO/AVO/DVO (the standard abbreviations for the
+    # three common Russian voice-over styles: multi-voice, author's,
+    # dual-voice), их кириллические аналоги, or bare Cyrillic anywhere in
+    # the title, in either script.
     #
-    # The `[а-яёА-ЯЁ]` (bare Cyrillic) branch is close to dead weight in
-    # practice, confirmed live against this exact Radarr build (6.3.0): its
-    # ReleaseTitleSpecification straightforwardly never matches on Cyrillic
-    # text, literal or ranged, byte-identical stored value or not — verified
-    # by testing the regex value directly against real RuTor/NoNaMe
-    # Club/BigFANGroup search results for a real movie (customFormatScore
-    # stayed 0 with a bare Cyrillic literal that was a byte-for-byte
-    # substring of the release title, while a plain ASCII substring of the
-    # same title scored normally). Left in in case a future Radarr version
-    # fixes it — it can't cause a false match, only a missed one — but don't
-    # rely on it: the *only* branch doing real work today is the MVO/AVO/DVO/
-    # dual-audio keyword alternation, which only fires on releases that
-    # actually spell one of those out. A release titled just "Матрица / The
-    # Matrix (1999) BDRip" with no such tag scores 0 here despite obviously
-    # being a Russian release — Bazarr (subtitles) is the fallback for
-    # exactly that gap, not this custom format.
+    # Two things confirmed live, not from docs, both worth knowing before
+    # touching this regex again:
     #
-    # Guarded by name so re-running never creates a duplicate.
+    # 1. Radarr and Sonarr do NOT behave the same here despite sharing this
+    #    exact custom-format implementation. Tested against this deploy's
+    #    real Radarr 6.3.0 and Sonarr builds with real RuTor/NoNaMe
+    #    Club/BigFANGroup/LostFilm/Kubik releases: Radarr's
+    #    ReleaseTitleSpecification never matches the bare `[а-яёА-ЯЁ]`
+    #    branch — a byte-identical Cyrillic literal copied straight from a
+    #    real release title still scored 0 — while Sonarr's matches it
+    #    correctly on the same kind of title. Left in for both apps anyway
+    #    (harmless on Radarr, where the keyword alternation is what's
+    #    actually carrying the weight; load-bearing on Sonarr).
+    #
+    # 2. Earlier versions of this regex had bare `dubbed` and `dual audio`
+    #    alternatives with no `rus` qualifier — confirmed to false-positive
+    #    on completely unrelated releases (a Hindi+English "Dual Audio"
+    #    Breaking Bad remux scored as "Russian Audio"). Fixed by requiring
+    #    the `rus` prefix on both.
+    #
+    # Guarded by name so re-running never creates a duplicate — see the
+    # "raise the score" and "merge 1080p qualities" tasks below for what
+    # runs on every deploy instead, including updates to an already-created
+    # format.
     - name: "Radarr / Sonarr: create the Russian Audio custom format"
       ansible.builtin.uri:
         url: "http://localhost:{{ item.item.port }}/api/{{ item.item.api }}/customformat"
@@ -1391,12 +1407,32 @@
               negate: false
               required: false
               fields:
-                - { name: value, value: '(?i)(rus\.?[\s\.\-_]?dub|dubbed|dual[\s\.\-_]?audio|многоголос|дублир|\bmvo\b|\bavo\b|\bdvo\b)|[а-яёА-ЯЁ]' }
+                - { name: value, value: "{{ russian_audio_regex }}" }
         status_code: [200, 201]
       loop: "{{ arr_custom_formats.results }}"
       loop_control:
         label: "{{ item.item.name }}"
       when: "'Russian Audio' not in (item.json | default([]) | map(attribute='name') | list)"
+
+    # Re-applies the regex to an already-existing custom format too (the
+    # create task above is guarded by name and only runs once) — so a repo
+    # update to russian_audio_regex reaches a server that already has this
+    # format from an earlier deploy, not just a fresh one.
+    - name: "Radarr / Sonarr: keep the Russian Audio regex up to date"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ item.item.port }}/api/{{ item.item.api }}/customformat/{{ existing_cf.id }}"
+        method: PUT
+        headers:
+          X-Api-Key: "{{ item.item.key }}"
+        body_format: json
+        body: "{{ existing_cf | combine({'specifications': [existing_cf.specifications.0 | combine({'fields': [{'name': 'value', 'value': russian_audio_regex}]})]}) }}"
+        status_code: [200, 202]
+      vars:
+        existing_cf: "{{ item.json | selectattr('name', 'equalto', 'Russian Audio') | first }}"
+      when: "'Russian Audio' in (item.json | default([]) | map(attribute='name') | list)"
+      loop: "{{ arr_custom_formats.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
 
     # Creating a custom format auto-adds it to every quality profile with a
     # score of 0 (no effect); this re-fetches HD-1080p specifically to raise
@@ -1414,30 +1450,62 @@
       loop_control:
         label: "{{ item.name }}"
 
-    - name: "Radarr / Sonarr: give Russian-audio releases a score bonus in HD-1080p"
+    # Quality tier normally wins over Custom Format score outright — Radarr/
+    # Sonarr only let score break a tie WITHIN the same quality rank, never
+    # across ranks. Found live: a Russian season-pack release scored 1000
+    # (correctly) but was still ignored in favour of an English release,
+    # because that English one happened to be Remux — a higher *quality*
+    # rank than the Russian BDRip/WEBDL that was actually available, so the
+    # score never even got compared. Since the ask here is explicitly
+    # "prefer Russian even over quality", the fix is merging WEBDL-1080p,
+    # WEBRip-1080p, plain Bluray-1080p and the Remux-1080p tier into one
+    # single rank — once they're equal rank, score is what decides between
+    # them, and Russian's 1000 wins outright.
+    - name: "Radarr / Sonarr: merge 1080p qualities into one rank so language outranks them"
       ansible.builtin.uri:
         url: "http://localhost:{{ item.item.port }}/api/{{ item.item.api }}/qualityprofile/{{ profile.id }}"
         method: PUT
         headers:
           X-Api-Key: "{{ item.item.key }}"
         body_format: json
-        # Every other formatItem is carried over unchanged; only the "Russian
-        # Audio" one gets its score raised (combine() overlays just the score
-        # key, keeping that item's own format/name as-is). upgradeAllowed and
-        # cutoffFormatScore are what make Radarr/Sonarr keep searching for a
-        # Russian release even after an English one has already been grabbed.
         body: >-
           {{ profile | combine({
                'formatItems': new_format_items,
                'upgradeAllowed': true,
                'cutoffFormatScore': russian_audio_score,
+               'items': new_items,
+               'cutoff': new_cutoff,
              }) }}
         status_code: [200, 202]
       vars:
         profile: "{{ item.json | selectattr('name', 'equalto', jellyseerr_quality_profile) | first }}"
+        # Every other formatItem is carried over unchanged; only "Russian
+        # Audio" gets its score raised. upgradeAllowed + cutoffFormatScore
+        # are what make Radarr/Sonarr keep searching for a Russian release
+        # even after an English one has already been grabbed.
         new_format_items: >-
           {{ (profile.formatItems | rejectattr('name', 'equalto', 'Russian Audio') | list)
              + [(profile.formatItems | selectattr('name', 'equalto', 'Russian Audio') | first) | combine({'score': russian_audio_score})] }}
+        # 1080 as the new group's id: distinct from every real quality id
+        # (tops out around 31) and every existing named group's id (the
+        # factory WEB-xxx groups use 1000-1003) on both apps.
+        merge_group_name: "1080p (language beats quality)"
+        merge_group_id: 1080
+        already_merged: "{{ merge_group_name in (profile.items | rejectattr('quality', 'defined') | map(attribute='name') | list) }}"
+        # Matched by quality *name*, not id: Radarr calls its remux tier
+        # "Remux-1080p", Sonarr calls the same tier "Bluray-1080p Remux" —
+        # listing both names here is what makes one task work for both apps.
+        merge_names: ["WEBDL-1080p", "WEBRip-1080p", "Bluray-1080p", "Remux-1080p", "Bluray-1080p Remux"]
+        leaf_items: "{{ profile.items | selectattr('quality', 'defined') | list }}"
+        group_items: "{{ profile.items | rejectattr('quality', 'defined') | list }}"
+        leaves_from_groups: "{{ (group_items | map(attribute='items') | list) | sum(start=[]) }}"
+        all_leaves: "{{ leaf_items + leaves_from_groups }}"
+        merged_leaves: "{{ all_leaves | selectattr('quality.name', 'in', merge_names) | map('combine', {'allowed': true}) | list }}"
+        kept_top_leaves: "{{ leaf_items | rejectattr('quality.name', 'in', merge_names) | list }}"
+        kept_groups: "{{ group_items | rejectattr('name', 'equalto', 'WEB 1080p') | list }}"
+        new_quality_group: "{{ {'id': merge_group_id, 'name': merge_group_name, 'allowed': true, 'items': merged_leaves} }}"
+        new_items: "{{ profile.items if already_merged else (kept_top_leaves + kept_groups + [new_quality_group]) }}"
+        new_cutoff: "{{ profile.cutoff if already_merged else merge_group_id }}"
       loop: "{{ arr_profiles_for_scoring.results }}"
       loop_control:
         label: "{{ item.item.name }}"
