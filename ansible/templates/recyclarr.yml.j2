@@ -8,9 +8,21 @@
 # instances" and silently sync nothing at all, no error, exit code 0. Found
 # by actually running this against the real containers, not from the docs.
 #
-# trash_id values are straight from recyclarr's own config-templates repo
-# (github.com/recyclarr/config-templates), not guessed:
-#   radarr/templates/hd-bluray-web.yml, sonarr/templates/web-1080p.yml
+# custom_format_groups' trash_id values are straight from recyclarr's own
+# config-templates repo (github.com/recyclarr/config-templates), not
+# guessed: radarr/templates/hd-bluray-web.yml, sonarr/templates/web-1080p.yml
+#
+# quality_profiles below is deliberately name-only, no trash_id: a trash_id
+# hands the WHOLE quality list + cutoff over to the TRaSH guide's own
+# opinion of what "HD-1080p" should allow, which does NOT include
+# Remux-1080p (found the hard way — a real sync replaced this profile's
+# quality list, `deploy.yml`'s existing Radarr/Sonarr config had Remux-1080p
+# allowed, and losing it caused Radarr to grab a redundant non-Remux copy
+# alongside an already-downloading Remux one, since the Remux no longer
+# counted as "wanted"). name-only + no trash_id is Recyclarr's other
+# documented mode: it targets an existing profile purely as somewhere to
+# assign the custom_format_groups scores below, without touching its
+# quality list or cutoff at all.
 #
 # reset_unmatched_scores + except: this lets Recyclarr keep the profile free
 # of stray custom-format scores over time, while explicitly never touching
@@ -25,8 +37,7 @@ radarr:
     api_key: {{ radarr_api_key }}
 
     quality_profiles:
-      - trash_id: d1d67249d3890e49bc12e275d989a7e9  # HD Bluray + WEB
-        name: {{ jellyseerr_quality_profile }}
+      - name: {{ jellyseerr_quality_profile }}
         reset_unmatched_scores:
           enabled: true
           except:
@@ -35,7 +46,11 @@ radarr:
     custom_format_groups:
       add:
         - trash_id: f8bf8eab4617f12dfdbd16303d8da245  # [Optional] Golden Rule HD
+          assign_scores_to:
+            - name: {{ jellyseerr_quality_profile }}
         - trash_id: a3ac6af01d78e4f21fcb75f601ac96df  # [Unwanted] Unwanted Formats
+          assign_scores_to:
+            - name: {{ jellyseerr_quality_profile }}
 
 sonarr:
   reelhub_sonarr:
@@ -43,8 +58,7 @@ sonarr:
     api_key: {{ sonarr_api_key }}
 
     quality_profiles:
-      - trash_id: 72dae194fc92bf828f32cde7744e51a1  # WEB-1080p
-        name: {{ jellyseerr_quality_profile }}
+      - name: {{ jellyseerr_quality_profile }}
         reset_unmatched_scores:
           enabled: true
           except:
@@ -53,4 +67,8 @@ sonarr:
     custom_format_groups:
       add:
         - trash_id: 158188097a58d7687dee647e04af0da3  # [Optional] Golden Rule HD
+          assign_scores_to:
+            - name: {{ jellyseerr_quality_profile }}
         - trash_id: 59c3af66780d08332fdc64e68297098f  # [Unwanted] Unwanted Formats
+          assign_scores_to:
+            - name: {{ jellyseerr_quality_profile }}

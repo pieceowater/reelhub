@@ -28,3 +28,11 @@ prowlarr_admin_pass: "{{ master_pass }}"
 # and keep a copy somewhere else, because a lost restic password makes every
 # existing backup permanently unreadable, with no recovery.
 restic_pass: "CHANGE_ME_before_first_deploy_and_never_again"
+
+# Telegram notifications from Jellyseerr ("your movie is ready") — optional,
+# off while either is empty. Get telegram_bot_token from @BotFather
+# (message it /newbot); telegram_chat_id is your own numeric chat id, read
+# from https://api.telegram.org/bot<token>/getUpdates after you've sent that
+# new bot at least one message yourself (bots can't message you first).
+telegram_bot_token: ""
+telegram_chat_id: ""

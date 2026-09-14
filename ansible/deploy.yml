@@ -1576,7 +1576,47 @@
           config/*/config.xml).
       when: jsr_cookie is not defined
 
-    # ---------- 8c. Recyclarr: sync TRaSH-Guides quality profiles ----------
+    # ---------- 8c. Jellyseerr: Telegram notifications (optional) ----------
+    #
+    # Off by default (telegram_bot_token empty in vars.yml) — get a token
+    # from @BotFather, message your new bot once (bots can't message you
+    # first), then read your chat id from
+    # https://api.telegram.org/bot<token>/getUpdates. See vars.yml.example.
+    #
+    # types is a bitmask (Jellyseerr/Overseerr's Notification enum) — 8 is
+    # MEDIA_AVAILABLE alone ("your movie/show is ready"), matching exactly
+    # what was asked for; combine bits for more (e.g. + 4 for MEDIA_APPROVED)
+    # or change it later in Jellyseerr's own Settings -> Notifications ->
+    # Telegram, which keeps working normally after this sets it up once.
+    #
+    # This is a full replace, not a merge (POST /settings/notifications/*
+    # writes the whole options object) — harmless here since every field
+    # this endpoint owns is set in the one request below.
+    - name: "Jellyseerr: enable Telegram notifications"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyseerr_port }}/api/v1/settings/notifications/telegram"
+        method: POST
+        headers:
+          Cookie: "{{ jsr_cookie }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          enabled: true
+          embedPoster: true
+          types: 8
+          options:
+            botAPI: "{{ telegram_bot_token }}"
+            chatId: "{{ telegram_chat_id }}"
+            messageThreadId: ""
+            sendSilently: false
+        status_code: 200
+      when:
+        - jsr_cookie is defined
+        - telegram_bot_token | default('') | length > 0
+        - telegram_chat_id | default('') | length > 0
+      ignore_errors: true
+
+    # ---------- 8d. Recyclarr: sync TRaSH-Guides quality profiles ----------
     #
     # Placed after the Russian Audio custom format above on purpose:
     # recyclarr.yml's reset_unmatched_scores.except list names it by title,
