@@ -98,7 +98,6 @@ client only for watching.
 | `make up` / `make down` | Start / stop, keeping everything you've configured |
 | `make logs` | See what's happening (`make logs S=radarr` for one service) |
 | `make urls` | Print every service's real address |
-| `make backup` / `make backup-list` | Back up `config/` right now / list existing backups |
 
 These (except `deploy`) just SSH to the server and run `docker compose` there
 — no Ansible involved, since that's simpler for something this direct. Run
@@ -307,38 +306,6 @@ either way yet.
 
 To move a service up, change its tag and run `make pull` — one at a time, so
 you know what broke if something does.
-
-### Backups
-
-`make deploy` sets up a nightly [restic](https://restic.net/) backup of
-`config/` — every service's settings, API keys and watch history, the one
-thing here that isn't just re-downloadable media. It runs as a systemd timer
-on the server itself (`systemctl status reelhub-backup.timer`), keeps the last
-7 daily / 4 weekly / 6 monthly snapshots, and writes into
-`~/reelhub-backups` — outside the git checkout on purpose, so `make destroy`
-or a bad `git reset` can never reach it.
-
-This protects against a fat-fingered setting, a bad upgrade, or `rm -rf
-config` — **not** against the server's disk itself failing, since the backup
-lives on that same disk. Point `backup_repo_dir` (in `deploy.yml`'s `vars:`
-block) at a second disk or a [remote restic
-backend](https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html)
-if you want that too.
-
-Restore something:
-
-```bash
-ssh <server>
-RESTIC_REPOSITORY=~/reelhub-backups RESTIC_PASSWORD_FILE=~/.reelhub/restic-password \
-  restic restore latest --target /path/to/restore
-```
-
-`restic snapshots` (with the same two env vars) lists what's there. The
-repo's password is `restic_pass` in `vars.yml` — it's deliberately independent
-of `master_pass` (see the comment next to it) and, unlike every other
-password in this project, changing it after the fact doesn't rotate anything:
-it makes every snapshot already taken permanently unreadable. Keep a copy of
-it somewhere other than this server.
 
 ### Troubleshooting
 

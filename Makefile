@@ -32,7 +32,7 @@ REMOTE_USER := $(shell awk '/^\[reelhub\]/{f=1;next} f && NF && $$1 !~ /^\[/{for
 REMOTE_DIR := reelhub
 REMOTE := $(SSH) $(REMOTE_USER)@$(REMOTE_HOST)
 
-.PHONY: help deploy up down restart ps logs pull urls backup backup-list destroy check check-remote
+.PHONY: help deploy up down restart ps logs pull urls destroy check check-remote
 
 help: ## Show this help
 	@echo "Reelhub"
@@ -64,12 +64,6 @@ logs: check-remote ## Tail logs for everything, or one service: make logs S=rada
 
 pull: check-remote ## Pull the pinned images again and recreate the containers
 	@$(REMOTE) 'cd $(REMOTE_DIR) && docker compose pull && docker compose up -d'
-
-backup: check-remote ## Run the config/ backup right now, instead of waiting for the nightly timer
-	@$(REMOTE) 'sudo systemctl start reelhub-backup.service && journalctl -u reelhub-backup.service -n 15 --no-pager'
-
-backup-list: check-remote ## List config/ backup snapshots on the server
-	@$(REMOTE) 'RESTIC_REPOSITORY=~/reelhub-backups RESTIC_PASSWORD_FILE=~/.reelhub/restic-password restic snapshots'
 
 urls: check-remote ## Print every service's URL on the server
 	@echo "  Jellyseerr   http://$(REMOTE_HOST):5055   request things here"

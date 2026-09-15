@@ -77,11 +77,6 @@
     # sudo. Change reelhub_dir if you'd rather it lived somewhere else.
     reelhub_dir: "{{ ansible_env.HOME }}/reelhub"
 
-    # Where the config/ backup (see section 9, near the end) keeps its restic
-    # repo. Deliberately outside reelhub_dir/project_dir: `make destroy` and a
-    # bad `git reset` on the checkout should never be able to reach backups of
-    # the very thing they might just have wiped.
-    backup_repo_dir: "{{ ansible_env.HOME }}/reelhub-backups"
     reelhub_repo_url: https://github.com/pieceowater/reelhub.git
     reelhub_repo_branch: main
     project_dir: "{{ reelhub_dir }}"
@@ -1872,122 +1867,7 @@
           scoring on top of what deploy.yml already configured.
       when: recyclarr_sync is failed
 
-    # ---------- 9. Backups: config/ only, restic, local repo on the server ----------
-    #
-    # config/ is every service's settings, API keys and watch history — the
-    # only state here that isn't trivially replaceable (data/ is just
-    # downloaded media; Radarr/Sonarr can re-grab it). This backs it up daily
-    # to a restic repo on the server's own disk: it protects against
-    # `rm -rf config`, a bad upgrade, or a fat-fingered setting, but NOT
-    # against that disk itself dying — restic repos can live on a second disk
-    # or a remote just as well (restic.net/docs), point backup_repo_dir at
-    # one if you want that later.
-
-    - name: Install restic
-      ansible.builtin.apt:
-        name: restic
-        state: present
-        update_cache: true
-      become: true
-
-    - name: "Backups: create the repo and script directories"
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: directory
-        mode: "0700"
-      loop:
-        - "{{ backup_repo_dir }}"
-        - "{{ ansible_env.HOME }}/.reelhub"
-
-    # restic's own password, not master_pass: this one is never meant to
-    # rotate. restic bakes a repo's password in at `restic init` and has no
-    # "change it later" — if this value ever drifts from what a repo was
-    # created with, every backup after that silently fails (wrong password),
-    # and everything backed up before that becomes unreadable. Keeping it
-    # independent of master_pass means renaming your qBittorrent/Jellyfin
-    # login never has that side effect.
-    - name: "Backups: write the restic repo password"
-      ansible.builtin.copy:
-        content: "{{ restic_pass }}\n"
-        dest: "{{ ansible_env.HOME }}/.reelhub/restic-password"
-        mode: "0600"
-
-    - name: "Backups: check whether the restic repo already exists"
-      ansible.builtin.command: restic snapshots
-      environment:
-        RESTIC_REPOSITORY: "{{ backup_repo_dir }}"
-        RESTIC_PASSWORD_FILE: "{{ ansible_env.HOME }}/.reelhub/restic-password"
-      register: restic_check
-      changed_when: false
-      failed_when: false
-
-    - name: "Backups: initialize the restic repo"
-      ansible.builtin.command: restic init
-      environment:
-        RESTIC_REPOSITORY: "{{ backup_repo_dir }}"
-        RESTIC_PASSWORD_FILE: "{{ ansible_env.HOME }}/.reelhub/restic-password"
-      when: restic_check.rc != 0
-
-    - name: "Backups: write the backup script"
-      ansible.builtin.copy:
-        dest: "{{ ansible_env.HOME }}/.reelhub/backup-config.sh"
-        mode: "0700"
-        content: |
-          #!/bin/sh
-          # Rewritten by `make deploy` every run — edit vars.yml's backup_repo_dir
-          # or the retention line below instead of this file directly.
-          set -e
-          export RESTIC_REPOSITORY="{{ backup_repo_dir }}"
-          export RESTIC_PASSWORD_FILE="{{ ansible_env.HOME }}/.reelhub/restic-password"
-          restic backup "{{ project_dir }}/config" --tag reelhub
-          restic forget --tag reelhub --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune
-
-    - name: "Backups: install the systemd service"
-      ansible.builtin.copy:
-        dest: /etc/systemd/system/reelhub-backup.service
-        mode: "0644"
-        content: |
-          [Unit]
-          Description=Back up Reelhub's config/ with restic
-
-          [Service]
-          Type=oneshot
-          User={{ ansible_user }}
-          ExecStart={{ ansible_env.HOME }}/.reelhub/backup-config.sh
-      become: true
-      register: backup_service_unit
-
-    - name: "Backups: install the systemd timer (daily)"
-      ansible.builtin.copy:
-        dest: /etc/systemd/system/reelhub-backup.timer
-        mode: "0644"
-        content: |
-          [Unit]
-          Description=Daily Reelhub config backup
-
-          [Timer]
-          OnCalendar=daily
-          Persistent=true
-
-          [Install]
-          WantedBy=timers.target
-      become: true
-      register: backup_timer_unit
-
-    - name: "Backups: reload systemd after a unit change"
-      ansible.builtin.systemd:
-        daemon_reload: true
-      become: true
-      when: backup_service_unit is changed or backup_timer_unit is changed
-
-    - name: "Backups: enable and start the timer"
-      ansible.builtin.systemd:
-        name: reelhub-backup.timer
-        enabled: true
-        state: started
-      become: true
-
-    # ---------- 10. Summary ----------
+    # ---------- 9. Summary ----------
 
     - name: Summary
       ansible.builtin.debug:
@@ -1998,9 +1878,6 @@
           - "Sonarr       http://localhost:{{ sonarr_port }}"
           - "Jellyfin     http://localhost:{{ jellyfin_port }}   user {{ jellyfin_admin_user }} / password in ansible/vars.yml"
           - "Jellyseerr   http://localhost:{{ jellyseerr_port }}"
-          - ""
-          - "config/ now backs up nightly to {{ backup_repo_dir }} (restic). Restore with:"
-          - "  RESTIC_REPOSITORY={{ backup_repo_dir }} RESTIC_PASSWORD_FILE=~/.reelhub/restic-password restic restore latest --target /path/to/restore"
           - ""
           - "Any task above marked 'failed (ignored)' is a Jellyfin/Jellyseerr step you"
           - "should finish in the browser. Everything else is configured."
