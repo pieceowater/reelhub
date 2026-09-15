@@ -241,6 +241,33 @@ Ansible's bootstrap step (see [How it works](#how-it-works)) puts it there.
 `config/` and `data/` only ever populate in the *server's* copy, since that's
 where the containers actually run.
 
+### Storage
+
+On this particular server, `data/` (`~/reelhub/data`) is a symlink to
+`/mnt/media-pool/reelhub-data`, not a plain directory — a
+[mergerfs](https://github.com/trapexit/mergerfs) pool combining this
+server's two physical disks (a big HDD at `/mnt/storage` and whatever the
+OS's own SSD isn't using) into one mount point with their combined free
+space. This is server-specific infrastructure, not something `make deploy`
+sets up — a fresh server just gets a plain directory instead, and works
+exactly the same either way; the pool only matters here because this
+particular server's media library outgrew its one HDD.
+
+Two things worth knowing if you ever touch this on this server:
+
+- `minfreespace=20G` in the mount options (see `/etc/fstab`) keeps mergerfs
+  from ever filling the SSD branch past 20GB free, so the media library
+  growing never starves the OS itself of disk space.
+- Hardlinks (what makes a finished download become an instant, free move
+  into `data/media` instead of a slow copy — see the top of
+  `docker-compose.yml`) still work through the pool, but only for two files
+  that both already live on the *same* underlying disk. mergerfs' `mfs`
+  (most free space) policy decides which disk a new download lands on, so
+  once in a great while a finished download and its move destination could
+  end up wanting to be on different disks — mergerfs handles that itself by
+  falling back to a real copy for just that one file, exactly like a
+  same-pool hardlink would fail on any other union filesystem.
+
 ### Configuration
 
 **`ansible/vars.yml`** — one password (`master_pass`), used for qBittorrent,
