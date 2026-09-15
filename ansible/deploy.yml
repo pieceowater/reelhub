@@ -501,6 +501,18 @@
           max_connec_per_torrent: 150
           max_uploads: 20
           max_uploads_per_torrent: 6
+          # Default queueing (3 active downloads at a time) turns into a
+          # silent bottleneck the moment more than 3 things are grabbed at
+          # once — found live with ~50 items backed up in "queuedDL" doing
+          # nothing, while a manually-grabbed release that looked like it
+          # had failed (Radarr logged it as sent successfully) was actually
+          # just stuck 48th in line. Not disabling queueing outright since
+          # some ceiling still protects the CGNAT-limited connection above
+          # from being spread across too many torrents at once.
+          queueing_enabled: true
+          max_active_downloads: 8
+          max_active_torrents: 12
+          max_active_uploads: 4
       when: qbt_cookie is defined
 
     # Verify the change actually took — see the to_json note above for why this
@@ -1134,6 +1146,7 @@
         body_format: json
         body:
           LibraryOptions:
+            EnableRealtimeMonitor: true
             PathInfos:
               - Path: "{{ radarr_root }}"
         status_code: [200, 204]
@@ -1152,6 +1165,7 @@
         body_format: json
         body:
           LibraryOptions:
+            EnableRealtimeMonitor: true
             PathInfos:
               - Path: "{{ sonarr_root }}"
         status_code: [200, 204]
@@ -1159,6 +1173,46 @@
         - jf_token is defined
         - jf_libs is succeeded
         - "'TV Shows' not in (jf_libs.json | default([]) | map(attribute='Name') | list)"
+      ignore_errors: true
+
+    # EnableRealtimeMonitor above only takes effect when a library is first
+    # created — it's silently ignored on a library that already existed
+    # before this line was added, which is exactly what left Jellyfin stuck
+    # showing a series with 0 episodes indexed until someone found and ran
+    # a manual /Library/Refresh: Sonarr had already moved 26 files in, and
+    # nothing told Jellyfin they were there. Without this watching by
+    # default, every finished download needs a manual library scan before
+    # it's actually playable. This re-applies the setting to both libraries
+    # unconditionally so it also reaches one that already existed.
+    - name: "Jellyfin: re-fetch libraries to turn on realtime monitoring"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyfin_port }}/Library/VirtualFolders"
+        headers:
+          Authorization: 'MediaBrowser Token="{{ jf_token }}"'
+        status_code: 200
+      register: jf_libs_for_monitor
+      when: jf_token is defined
+      changed_when: false
+      ignore_errors: true
+
+    - name: "Jellyfin: turn on realtime library monitoring"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ jellyfin_port }}/Library/VirtualFolders/LibraryOptions"
+        method: POST
+        headers:
+          Authorization: 'MediaBrowser Token="{{ jf_token }}"'
+        body_format: json
+        body:
+          Id: "{{ item.ItemId }}"
+          LibraryOptions: "{{ item.LibraryOptions | combine({'EnableRealtimeMonitor': true}) }}"
+        status_code: [200, 204]
+      loop: "{{ jf_libs_for_monitor.json | default([]) }}"
+      loop_control:
+        label: "{{ item.Name }}"
+      when:
+        - jf_token is defined
+        - jf_libs_for_monitor is succeeded
+        - not item.LibraryOptions.EnableRealtimeMonitor | default(false)
       ignore_errors: true
 
     # Intel Quick Sync (VAAPI) hardware transcoding — only runs if /dev/dri
@@ -1458,9 +1512,18 @@
     # rank than the Russian BDRip/WEBDL that was actually available, so the
     # score never even got compared. Since the ask here is explicitly
     # "prefer Russian even over quality", the fix is merging WEBDL-1080p,
-    # WEBRip-1080p, plain Bluray-1080p and the Remux-1080p tier into one
-    # single rank — once they're equal rank, score is what decides between
-    # them, and Russian's 1000 wins outright.
+    # WEBRip-1080p and plain Bluray-1080p into one single rank — once
+    # they're equal rank, score is what decides between them, and Russian's
+    # 1000 wins outright.
+    #
+    # Remux-1080p is deliberately NOT in that merged rank, and is forced
+    # disallowed below — a separate ask ("max 5-10GB movies"): Remux is
+    # effectively uncompressed and routinely 25-40GB for a feature film,
+    # which the per-minute size cap on qualitydefinition (see the task
+    # after this one) can't meaningfully constrain without making the tier
+    # pointless. Every oversized file this stack ever grabbed (Frida,
+    # Coraline, Clockwork Orange, Puss in Boots) was Remux — dropping it
+    # outright fixes the size complaint at its actual source.
     - name: "Radarr / Sonarr: merge 1080p qualities into one rank so language outranks them"
       ansible.builtin.uri:
         url: "http://localhost:{{ item.item.port }}/api/{{ item.item.api }}/qualityprofile/{{ profile.id }}"
@@ -1474,7 +1537,7 @@
                'upgradeAllowed': true,
                'cutoffFormatScore': russian_audio_score,
                'items': new_items,
-               'cutoff': new_cutoff,
+               'cutoff': merge_group_id,
              }) }}
         status_code: [200, 202]
       vars:
@@ -1501,11 +1564,22 @@
         # notation is the fix wherever this file uses dot access on the
         # profile directly; see the comment on leaves_from_groups below for
         # why the nested group objects use a different fix.
-        already_merged: "{{ merge_group_name in ((profile['items'] | rejectattr('quality', 'defined') | list) | map(attribute='name') | list) }}"
+        #
+        # No "already merged, skip" check: this recomputes items/cutoff
+        # from current state on every run instead, which is what makes it
+        # self-healing — an earlier live version of this task short-
+        # circuited by name, and went stale the moment merge_names changed
+        # (it left a rogue duplicate-quality group behind that Radarr/
+        # Sonarr's own "Must contain all qualities" validator then
+        # rejected). Recomputing from scratch costs nothing extra (the PUT
+        # is idempotent) and can never drift from what merge_names/
+        # remux_names currently say.
+        #
         # Matched by quality *name*, not id: Radarr calls its remux tier
         # "Remux-1080p", Sonarr calls the same tier "Bluray-1080p Remux" —
         # listing both names here is what makes one task work for both apps.
-        merge_names: ["WEBDL-1080p", "WEBRip-1080p", "Bluray-1080p", "Remux-1080p", "Bluray-1080p Remux"]
+        merge_names: ["WEBDL-1080p", "WEBRip-1080p", "Bluray-1080p"]
+        remux_names: ["Remux-1080p", "Bluray-1080p Remux"]
         leaf_items: "{{ profile['items'] | selectattr('quality', 'defined') | list }}"
         group_items: "{{ profile['items'] | rejectattr('quality', 'defined') | list }}"
         # map(attribute='items'), not a `g.items`/`g['items']` comprehension:
@@ -1516,15 +1590,72 @@
         # ("expected token ',', got 'for'") even though it's valid Jinja2
         # elsewhere. Both found by testing in isolation before trusting
         # either.
+        #
+        # Flattening every group's contents into all_leaves — rather than
+        # only reading top-level leaf_items — is what makes this
+        # self-healing across re-runs despite having no "already merged"
+        # check: whatever ended up inside a previous run's merge group
+        # (Remux included, from before this task excluded it) gets pulled
+        # back out here and re-sorted by the current merge_names/
+        # remux_names on every pass, so nothing can stay stuck inside a
+        # group this task no longer wants it in.
         leaves_from_groups: "{{ (group_items | map(attribute='items') | list) | sum(start=[]) }}"
         all_leaves: "{{ leaf_items + leaves_from_groups }}"
         merged_leaves: "{{ all_leaves | selectattr('quality.name', 'in', merge_names) | map('combine', {'allowed': true}) | list }}"
-        kept_top_leaves: "{{ leaf_items | rejectattr('quality.name', 'in', merge_names) | list }}"
-        kept_groups: "{{ group_items | rejectattr('name', 'equalto', 'WEB 1080p') | list }}"
+        # Everything NOT going into the merged group, with Remux explicitly
+        # forced to disallowed (it may already be `allowed: true` — e.g.
+        # left over from before this task excluded it).
+        other_leaves: "{{ all_leaves | rejectattr('quality.name', 'in', merge_names) | list }}"
+        other_leaves_fixed: >-
+          {{ (other_leaves | rejectattr('quality.name', 'in', remux_names) | list)
+             + (other_leaves | selectattr('quality.name', 'in', remux_names) | map('combine', {'allowed': false}) | list) }}
         new_quality_group: "{{ {'id': merge_group_id, 'name': merge_group_name, 'allowed': true, 'items': merged_leaves} }}"
-        new_items: "{{ profile['items'] if already_merged else (kept_top_leaves + kept_groups + [new_quality_group]) }}"
-        new_cutoff: "{{ profile['cutoff'] if already_merged else merge_group_id }}"
+        new_items: "{{ other_leaves_fixed + [new_quality_group] }}"
       loop: "{{ arr_profiles_for_scoring.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    # Quality definitions cap file size per quality, expressed as MB per
+    # minute of runtime rather than a flat size — Radarr/Sonarr multiply
+    # this by the item's actual runtime, so a 90-minute movie and a 3-hour
+    # one each land near the same target GB instead of one being capped too
+    # tight and the other too loose. maxSize was previously unset (no cap
+    # at all) on Bluray-1080p specifically, which combined with Remux still
+    # being allowed at the time is exactly how a 36GB Frida happened.
+    # 85 MB/min -> ~10.2GB for a 2-hour movie, ~6.4GB for 75 minutes;
+    # preferredSize 65 MB/min aims below that whenever a release exists at
+    # that size, per "max 5-10GB, most of the time."
+    - name: "Radarr / Sonarr: fetch quality definitions to cap file sizes"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ item.port }}/api/{{ item.api }}/qualitydefinition"
+        headers:
+          X-Api-Key: "{{ item.key }}"
+        status_code: 200
+      register: arr_quality_defs
+      changed_when: false
+      loop: *arr_apps
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: "Radarr / Sonarr: cap Bluray/WEB quality sizes to ~5-10GB"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ item.item.port }}/api/{{ item.item.api }}/qualitydefinition/update"
+        method: PUT
+        headers:
+          X-Api-Key: "{{ item.item.key }}"
+        body_format: json
+        # Every definition this app has (SDTV, DVD, the 2160p tiers, Remux,
+        # etc.) is carried over unchanged; only the four capped_qualities
+        # get maxSize/preferredSize overridden.
+        body: "{{ uncapped_defs + capped_defs }}"
+        status_code: [200, 202]
+      vars:
+        capped_qualities: ["Bluray-720p", "WEBDL-1080p", "WEBRip-1080p", "Bluray-1080p"]
+        uncapped_defs: "{{ item.json | rejectattr('quality.name', 'in', capped_qualities) | list }}"
+        capped_defs: >-
+          {{ item.json | selectattr('quality.name', 'in', capped_qualities)
+             | map('combine', {'maxSize': 85, 'preferredSize': 65}) | list }}
+      loop: "{{ arr_quality_defs.results }}"
       loop_control:
         label: "{{ item.item.name }}"
 
